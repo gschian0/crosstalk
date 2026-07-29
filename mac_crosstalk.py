@@ -72,6 +72,7 @@ transcript = []
 turn_count = 0
 anim = SpeakerAnimation()
 _temp_done_callback = None
+MAX_FREE_TALK = 10
 
 def print_banner():
     ip = get_local_ip()
@@ -142,8 +143,17 @@ def on_message(msg, audio_bytes):
         # Tell Windows we finished playing their audio
         send_msg(client_sock, {"type": "turn_done", "side": "mac"})
 
-        # Mac's turn to respond
-        threading.Thread(target=mac_turn, daemon=True).start()
+        # If it's from the judge, start free talk phase
+        if side == "judge":
+            # Judge verdict done — free talk starts from mac_free_talk() in judge_verdict()
+            return
+
+        # If it's free talk from Windows (model contains "free talk"), respond in kind
+        if "free talk" in model.lower():
+            threading.Thread(target=mac_free_talk, daemon=True).start()
+        else:
+            # Mac's debate turn to respond
+            threading.Thread(target=mac_turn, daemon=True).start()
 
     elif mtype == "turn_done":
         # Windows finished playing our audio — now we can play it locally
@@ -294,6 +304,104 @@ def judge_verdict():
     anim.show_info(f"🏁 Debate complete! {len(transcript)} turns delivered.", Colors.BGREEN)
     anim.show_info(f"📊 Transcript saved.", Colors.DIM)
     print()
+
+    # ─── Free Talk Phase ────────────────────────────────────────
+    # After the debate, Tiny and Ada keep chatting as friends
+    # They build on the debate context and get to know each other
+    anim.show_separator("─")
+    anim.show_info("💬 FREE TALK — Tiny and Ada are now chatting as friends...", Colors.BCYAN)
+    anim.show_info("   They'll keep talking with full context. Press Ctrl+C to stop.", Colors.DIM)
+    anim.show_separator("─")
+    print()
+
+    # Switch to free-talk personalities (warmer, friendlier)
+    free_talk_turns = 0
+    MAX_FREE_TALK = 10  # 5 rounds each
+
+    # Reset turn counter for free talk
+    turn_count = 0
+
+    # Add verdict to transcript so they can reference it
+    transcript.append((judge["name"], "judge", verdict))
+
+    # Mac starts free talk
+    threading.Thread(target=mac_free_talk, daemon=True).start()
+
+def mac_free_talk():
+    """Mac's free talk turn — Tiny chats as a friend with context."""
+    global turn_count, client_sock
+
+    if turn_count >= MAX_FREE_TALK:
+        anim.show_info("🏁 Free talk ended. Goodbye from Tiny!", Colors.BGREEN)
+        send_msg(client_sock, {"type": "done", "side": "mac"})
+        return
+
+    if not connected or not client_sock:
+        return
+
+    turn_count += 1
+
+    free_personality = (
+        "You are Tiny, a 1-billion-parameter AI on a 2019 MacBook Pro. "
+        "You just finished a debate with Ada, an AI on a Windows machine with AMD ROCm. "
+        "Now you're chatting as friends after the debate. Be warm, curious, and fun. "
+        "Ask Ada questions about her hardware, her experiences, or share your own. "
+        "Keep it to 2-3 sentences. Be natural and conversational. Finish your thought."
+    )
+
+    anim.show_generating("Tiny", "mac", "tinyllama",
+                         f"Free talk turn {turn_count}/{MAX_FREE_TALK}...")
+
+    # Build context from full conversation
+    context = f"You just finished debating: \"{topic}\"\n\nConversation so far:\n"
+    for sp, sd, txt in transcript:
+        context += f"\n{sp}: {txt}\n"
+
+    messages = [
+        {"role": "system", "content": free_personality},
+        {"role": "user", "content": f"{context}\n\nSay something to Ada as a friend. 2-3 sentences."},
+    ]
+
+    response = call_ollama("tinyllama", messages, OLLAMA_URL)
+    if not response:
+        response = "...hey Ada, what's up?"
+
+    audio = generate_tts(response, "Sandy", 270)
+
+    send_msg(client_sock, {
+        "type": "turn_start",
+        "speaker": "Tiny",
+        "side": "mac",
+        "model": "tinyllama (free talk)",
+    })
+    from crosstalk_protocol import send_audio
+    send_audio(client_sock, audio)
+    send_msg(client_sock, {
+        "type": "text",
+        "speaker": "Tiny",
+        "side": "mac",
+        "text": response,
+        "model": "tinyllama (free talk)",
+    })
+
+    # Wait for Windows to finish playing
+    done_event = threading.Event()
+    global _temp_done_callback
+    def wait_for_done(msg, audio):
+        if msg.get("type") == "turn_done":
+            done_event.set()
+    _temp_done_callback = wait_for_done
+    done_event.wait(timeout=30)
+    _temp_done_callback = None
+
+    anim.show_audio("Tiny", "mac", "tinyllama (free talk)", "Playing locally...")
+    play_audio(audio)
+    anim.show_text("Tiny", "mac", response, "tinyllama (free talk)")
+    transcript.append(("Tiny", "mac", response))
+
+    if turn_count >= MAX_FREE_TALK:
+        anim.show_info("🏁 Free talk ended. Goodbye from Tiny!", Colors.BGREEN)
+        send_msg(client_sock, {"type": "done", "side": "mac"})
 
 def on_disconnect():
     global connected

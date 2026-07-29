@@ -70,7 +70,6 @@ client_sock = None
 topic = "Is pizza better than tacos?"
 transcript = []
 turn_count = 0
-pending_audio = None  # bytes from turn_start — text handler must play these
 anim = SpeakerAnimation()
 _temp_done_callback = None
 MAX_FREE_TALK = 10
@@ -95,7 +94,7 @@ def print_banner():
 
 def on_message(msg, audio_bytes):
     """Handle incoming messages from Windows."""
-    global connected, turn_count, pending_audio
+    global connected, turn_count
 
     # Check for temporary done callback (used for turn synchronization)
     if _temp_done_callback:
@@ -122,13 +121,11 @@ def on_message(msg, audio_bytes):
         threading.Thread(target=mac_turn, daemon=True).start()
 
     elif mtype == "turn_start":
-        # Audio arrives HERE (with turn_start), not with text — stash it
-        pending_audio = audio_bytes or b""
+        # Windows is about to send audio + text
         speaker = msg.get("speaker", "Windows")
         side = msg.get("side", "windows")
         model = msg.get("model", "?")
-        n = len(pending_audio)
-        anim.show_audio(speaker, side, model, f"Receiving audio ({n} bytes)...")
+        anim.show_audio(speaker, side, model, "Streaming audio from Windows...")
 
     elif mtype == "text":
         speaker = msg.get("speaker", "Windows")
@@ -136,15 +133,16 @@ def on_message(msg, audio_bytes):
         side = msg.get("side", "windows")
         model = msg.get("model", "?")
 
-        audio = pending_audio if pending_audio is not None else (audio_bytes or b"")
-        pending_audio = None
+        # Play the streamed audio
+        # if audio_bytes:
+        #     play_audio(audio_bytes)
 
-        # Receiver plays — sender-only design means this is the only playback
-        if audio:
-            anim.show_audio(speaker, side, model, f"🔊 Playing Windows ({len(audio)} bytes)...")
-            play_audio(audio)
-        else:
-            anim.show_info("⚠️ No audio bytes with this turn", Colors.YELLOW)
+        # FIX: Generate TTS locally with correct audio device (94 = MacBook speakers)
+        # The streamed audio bytes don't route through the right device on Mac
+        import subprocess
+        if text.strip():
+            subprocess.run(["say", "-v", "Alex", "-r", "200", "-a", AUDIO_DEVICE, text.strip()],
+                           capture_output=True)
 
         anim.show_text(speaker, side, text, model)
         transcript.append((speaker, side, text))
@@ -305,9 +303,11 @@ def judge_verdict():
     send_msg(client_sock, {"type": "done", "side": "mac"})
 
     # Play locally
-    # FIX: Judge plays locally since it's the last speaker — no sync needed
-    anim.show_audio(judge["name"], "judge", judge["model"] + " (GPU)", "Streaming verdict...")
-    play_audio(audio)
+    # FIX: Judge plays locally with correct audio device (the sender IS the Mac)
+    import subprocess
+    if verdict.strip():
+        subprocess.run(["say", "-v", judge["voice"], "-r", str(judge["rate"]), "-a", AUDIO_DEVICE, verdict.strip()],
+                       capture_output=True)
     anim.show_text(judge["name"], "judge", verdict, judge["model"] + " (GPU)")
 
     anim.show_separator("═")

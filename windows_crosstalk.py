@@ -59,7 +59,6 @@ sock = None
 topic = "Is pizza better than tacos?"
 transcript = []
 turn_count = 0
-pending_audio = None  # bytes from turn_start — text handler must play these
 anim = SpeakerAnimation()
 _temp_done_callback = None
 MAX_FREE_TALK = 10
@@ -80,7 +79,7 @@ def print_banner():
 
 def on_message(msg, audio_bytes):
     """Handle incoming messages from Mac."""
-    global connected, topic, turn_count, pending_audio
+    global connected, topic, turn_count
 
     # Check for temporary done callback (used for turn synchronization)
     if _temp_done_callback:
@@ -107,13 +106,11 @@ def on_message(msg, audio_bytes):
         # Wait for Mac to go first — they'll send a turn
 
     elif mtype == "turn_start":
-        # Audio arrives HERE (with turn_start), not with text — stash it
-        pending_audio = audio_bytes or b""
+        # Mac is about to send audio + text
         speaker = msg.get("speaker", "Mac")
         side = msg.get("side", "mac")
         model = msg.get("model", "?")
-        n = len(pending_audio)
-        anim.show_audio(speaker, side, model, f"Receiving audio ({n} bytes)...")
+        anim.show_audio(speaker, side, model, "Streaming audio from Mac...")
 
     elif mtype == "text":
         speaker = msg.get("speaker", "Mac")
@@ -121,21 +118,22 @@ def on_message(msg, audio_bytes):
         side = msg.get("side", "mac")
         model = msg.get("model", "?")
 
-        audio = pending_audio if pending_audio is not None else (audio_bytes or b"")
-        pending_audio = None
+        # Play the streamed audio
+        # if audio_bytes:
+        #     play_audio(audio_bytes)
 
-        # Receiver plays — sender-only design means this is the only playback
-        if audio:
-            if audio[:4] == b"RIFF":
-                anim.show_audio(speaker, side, model, "🔊 Playing Mac...")
-                play_audio(audio)
-            else:
-                anim.show_info(
-                    f"⚠️ Got {len(audio)}B audio but not WAV (header={audio[:4]!r}) — Mac needs afconvert",
-                    Colors.YELLOW,
-                )
-        else:
-            anim.show_info("⚠️ No audio bytes with this turn", Colors.YELLOW)
+        # FIX: Generate TTS locally using Windows SAPI
+        # The streamed audio bytes may not play correctly on all Windows audio setups
+        if text.strip():
+            import subprocess
+            safe_text = text.strip().replace("'", "''").replace('"', "")
+            ps_cmd = f"""
+            Add-Type -AssemblyName System.Speech
+            $synth = New-Object System.Speech.Synthesis.SpeechSynthesizer
+            $synth.Rate = 0
+            $synth.Speak(\"{safe_text}\")
+            """
+            subprocess.run(["powershell", "-Command", ps_cmd], capture_output=True)
 
         anim.show_text(speaker, side, text, model)
         transcript.append((speaker, side, text))

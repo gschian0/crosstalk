@@ -319,8 +319,41 @@ def generate_tts(text: str, voice: str = None, rate: int = 200) -> bytes:
     return b""
 
 def play_audio(audio_bytes: bytes) -> None:
-    """Play audio bytes on the current platform."""
+    """Play audio bytes on the current platform (blocking until done)."""
     if is_mac():
         play_audio_macos(audio_bytes)
     elif is_windows():
         play_audio_windows(audio_bytes)
+
+def wav_duration_seconds(audio_bytes: bytes, fallback: float = 2.5) -> float:
+    """Estimate WAV playback length from byte rate (for turn timers)."""
+    if not audio_bytes or len(audio_bytes) < 44 or audio_bytes[:4] != b"RIFF":
+        return fallback
+    try:
+        byte_rate = struct.unpack_from("<I", audio_bytes, 28)[0]
+        if byte_rate <= 0:
+            return fallback
+        # Skip header; good enough for TTS WAVs
+        seconds = max(0.4, (len(audio_bytes) - 44) / float(byte_rate))
+        return min(seconds, 120.0)
+    except Exception:
+        return fallback
+
+def play_local_with_timer(audio_bytes: bytes, duration_sec: float = None) -> float:
+    """Play on THIS machine only, and hold at least `duration_sec` so turns don't overlap.
+
+    Returns the enforced listen/speak length in seconds.
+    """
+    dur = duration_sec if duration_sec is not None else wav_duration_seconds(audio_bytes)
+    start = time.time()
+    if audio_bytes:
+        play_audio(audio_bytes)
+    remaining = dur - (time.time() - start)
+    if remaining > 0.05:
+        time.sleep(remaining)
+    return dur
+
+def wait_peer_speaking(duration_sec: float, label: str = "peer") -> None:
+    """Sit quiet while the other computer's model talks (no local TTS of their lines)."""
+    dur = max(0.4, float(duration_sec or 2.5))
+    time.sleep(dur)

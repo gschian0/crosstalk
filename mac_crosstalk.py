@@ -70,6 +70,7 @@ client_sock = None
 topic = "Is pizza better than tacos?"
 transcript = []
 turn_count = 0
+pending_audio = None  # bytes from turn_start — text handler must play these
 anim = SpeakerAnimation()
 _temp_done_callback = None
 MAX_FREE_TALK = 10
@@ -94,7 +95,7 @@ def print_banner():
 
 def on_message(msg, audio_bytes):
     """Handle incoming messages from Windows."""
-    global connected, turn_count
+    global connected, turn_count, pending_audio
 
     # Check for temporary done callback (used for turn synchronization)
     if _temp_done_callback:
@@ -121,11 +122,13 @@ def on_message(msg, audio_bytes):
         threading.Thread(target=mac_turn, daemon=True).start()
 
     elif mtype == "turn_start":
-        # Windows is about to send audio + text
+        # Audio arrives HERE (with turn_start), not with text — stash it
+        pending_audio = audio_bytes or b""
         speaker = msg.get("speaker", "Windows")
         side = msg.get("side", "windows")
         model = msg.get("model", "?")
-        anim.show_audio(speaker, side, model, "Streaming audio from Windows...")
+        n = len(pending_audio)
+        anim.show_audio(speaker, side, model, f"Receiving audio ({n} bytes)...")
 
     elif mtype == "text":
         speaker = msg.get("speaker", "Windows")
@@ -133,9 +136,15 @@ def on_message(msg, audio_bytes):
         side = msg.get("side", "windows")
         model = msg.get("model", "?")
 
-        # Play the streamed audio
-        if audio_bytes:
-            play_audio(audio_bytes)
+        audio = pending_audio if pending_audio is not None else (audio_bytes or b"")
+        pending_audio = None
+
+        # Receiver plays — sender-only design means this is the only playback
+        if audio:
+            anim.show_audio(speaker, side, model, f"🔊 Playing Windows ({len(audio)} bytes)...")
+            play_audio(audio)
+        else:
+            anim.show_info("⚠️ No audio bytes with this turn", Colors.YELLOW)
 
         anim.show_text(speaker, side, text, model)
         transcript.append((speaker, side, text))

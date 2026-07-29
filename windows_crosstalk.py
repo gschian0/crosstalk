@@ -59,6 +59,7 @@ sock = None
 topic = "Is pizza better than tacos?"
 transcript = []
 turn_count = 0
+pending_audio = None  # bytes from turn_start — text handler must play these
 anim = SpeakerAnimation()
 _temp_done_callback = None
 MAX_FREE_TALK = 10
@@ -79,7 +80,7 @@ def print_banner():
 
 def on_message(msg, audio_bytes):
     """Handle incoming messages from Mac."""
-    global connected, topic, turn_count
+    global connected, topic, turn_count, pending_audio
 
     # Check for temporary done callback (used for turn synchronization)
     if _temp_done_callback:
@@ -106,11 +107,13 @@ def on_message(msg, audio_bytes):
         # Wait for Mac to go first — they'll send a turn
 
     elif mtype == "turn_start":
-        # Mac is about to send audio + text
+        # Audio arrives HERE (with turn_start), not with text — stash it
+        pending_audio = audio_bytes or b""
         speaker = msg.get("speaker", "Mac")
         side = msg.get("side", "mac")
         model = msg.get("model", "?")
-        anim.show_audio(speaker, side, model, "Streaming audio from Mac...")
+        n = len(pending_audio)
+        anim.show_audio(speaker, side, model, f"Receiving audio ({n} bytes)...")
 
     elif mtype == "text":
         speaker = msg.get("speaker", "Mac")
@@ -118,9 +121,21 @@ def on_message(msg, audio_bytes):
         side = msg.get("side", "mac")
         model = msg.get("model", "?")
 
-        # Play the streamed audio
-        if audio_bytes:
-            play_audio(audio_bytes)
+        audio = pending_audio if pending_audio is not None else (audio_bytes or b"")
+        pending_audio = None
+
+        # Receiver plays — sender-only design means this is the only playback
+        if audio:
+            if audio[:4] == b"RIFF":
+                anim.show_audio(speaker, side, model, "🔊 Playing Mac...")
+                play_audio(audio)
+            else:
+                anim.show_info(
+                    f"⚠️ Got {len(audio)}B audio but not WAV (header={audio[:4]!r}) — Mac needs afconvert",
+                    Colors.YELLOW,
+                )
+        else:
+            anim.show_info("⚠️ No audio bytes with this turn", Colors.YELLOW)
 
         anim.show_text(speaker, side, text, model)
         transcript.append((speaker, side, text))

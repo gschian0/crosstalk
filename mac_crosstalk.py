@@ -2,10 +2,10 @@
 """
 🍎 CROSSTALK — MAC SIDE (Host)
 
-Two-computer conversation model:
-  - Tiny (and judge) speak ONLY on this Mac
-  - Ada's lines are shown here, then we WAIT (duration timer) — we do NOT voice them
-  - No overlapping speech
+Two-computer conversation:
+  - Tiny / judge speak ONLY on this Mac (say → MacBook speakers device 94)
+  - Ada's text is shown here; we WAIT on duration_ms — never voice her here
+  - Speak lock + timer prevent overlap
 """
 
 import socket
@@ -13,6 +13,7 @@ import threading
 import sys
 import os
 import time
+import subprocess
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from crosstalk_protocol import (
@@ -23,6 +24,7 @@ from crosstalk_anim import SpeakerAnimation, Colors
 
 HOST_PORT = 9999
 OLLAMA_URL = "http://localhost:11434/api/chat"
+AUDIO_DEVICE = "94"  # MacBook speakers
 MAX_TURNS = 6
 MAX_FREE_TALK = 10
 
@@ -64,12 +66,25 @@ def print_banner():
     print()
     print(f"{Colors.BBLUE}{Colors.BOLD}╔══════════════════════════════════════════════════════════════╗{Colors.RESET}")
     print(f"{Colors.BBLUE}{Colors.BOLD}║  🍎 CROSSTALK — Tiny speaks HERE only                      ║{Colors.RESET}")
-    print(f"{Colors.BBLUE}{Colors.BOLD}║  Ada talks on Windows — we wait on a duration timer         ║{Colors.RESET}")
+    print(f"{Colors.BBLUE}{Colors.BOLD}║  Ada talks on Windows — wait on duration timer             ║{Colors.RESET}")
     print(f"{Colors.BBLUE}{Colors.BOLD}╚══════════════════════════════════════════════════════════════╝{Colors.RESET}")
     print()
     print(f"  {Colors.DIM}📡 Waiting for Windows... connect to {ip}:{HOST_PORT}{Colors.RESET}")
     print(f"  {Colors.DIM}📝 Topic: {topic}{Colors.RESET}")
     print()
+
+
+def play_mac_speakers(text: str, voice: str, rate: int) -> None:
+    """Route TTS to MacBook speakers (device 94)."""
+    if not text.strip():
+        return
+    try:
+        subprocess.run(
+            ["say", "-v", voice, "-r", str(rate), "-a", AUDIO_DEVICE, text.strip()],
+            capture_output=True, timeout=120,
+        )
+    except Exception:
+        pass
 
 
 def on_message(msg, audio_bytes):
@@ -104,9 +119,8 @@ def on_message(msg, audio_bytes):
             "audio": audio_bytes or b"",
             "duration_ms": msg.get("duration_ms"),
         }
-        n = len(pending_meta["audio"])
         anim.show_info(
-            f"📩 {pending_meta['speaker']} turn incoming ({n}B audio meta)...",
+            f"📩 {pending_meta['speaker']} on Windows ({pending_meta.get('duration_ms') or '?'} ms)...",
             Colors.DIM,
         )
         return
@@ -115,18 +129,13 @@ def on_message(msg, audio_bytes):
         meta = pending_meta
         pending_meta = {}
         threading.Thread(
-            target=handle_peer_text,
-            args=(msg, meta),
-            daemon=True,
-            name="peer-text",
+            target=handle_peer_text, args=(msg, meta), daemon=True, name="peer-text",
         ).start()
         return
 
-    if mtype == "turn_done":
-        return
-
-    if mtype == "done":
-        anim.show_info("✅ Windows signaled done.", Colors.BGREEN)
+    if mtype in ("done", "turn_done"):
+        if mtype == "done":
+            anim.show_info("✅ Windows signaled done.", Colors.BGREEN)
         return
 
     if mtype == "bye":
@@ -135,7 +144,7 @@ def on_message(msg, audio_bytes):
 
 
 def handle_peer_text(msg, meta):
-    """Show Ada's text, WAIT while Windows speakers talk — never voice Ada here."""
+    """Show Ada's text and wait while she speaks on Windows — silent on Mac."""
     global turn_count
 
     speaker = msg.get("speaker", meta.get("speaker", "Windows"))
@@ -144,14 +153,11 @@ def handle_peer_text(msg, meta):
     model = msg.get("model", meta.get("model", "?"))
     audio = meta.get("audio") or b""
 
-    dur = msg.get("duration_ms") or meta.get("duration_ms")
-    if dur:
-        wait_s = max(0.4, float(dur) / 1000.0)
-    else:
-        wait_s = wav_duration_seconds(audio, fallback=2.5)
+    dur_ms = msg.get("duration_ms") or meta.get("duration_ms")
+    wait_s = max(0.4, float(dur_ms) / 1000.0) if dur_ms else wav_duration_seconds(audio, 2.5)
 
     if not speak_lock.acquire(blocking=False):
-        anim.show_info("⏳ Tiny busy — skipping overlapping peer cue", Colors.YELLOW)
+        anim.show_info("⏳ Tiny busy — ack only", Colors.YELLOW)
         send_msg(client_sock, {"type": "turn_done", "side": "mac"})
         return
 
@@ -159,10 +165,9 @@ def handle_peer_text(msg, meta):
         anim.show_text(speaker, side, text, model)
         transcript.append((speaker, side, text))
         anim.show_info(
-            f"🎧 {speaker} speaking on Windows — waiting {wait_s:.1f}s (no Mac voice)",
+            f"🎧 {speaker} speaking on Windows — waiting {wait_s:.1f}s (Mac silent)",
             Colors.BGREEN,
         )
-        # Do NOT say/TTS Ada's lines on Mac — that caused the overlap
         time.sleep(wait_s)
         send_msg(client_sock, {"type": "turn_done", "side": "mac"})
 
@@ -178,13 +183,16 @@ def handle_peer_text(msg, meta):
 
 
 def _deliver_local_speech(debater, response, side="mac", model_label=None):
-    """Speak ONLY on Mac speakers. Cue Windows with duration, then play locally."""
+    """Cue Windows with duration, then speak ONLY on Mac speakers."""
     model = model_label or debater["model"]
-    audio = generate_tts(response, debater.get("voice"), debater.get("rate", 200))
+    voice = debater.get("voice") or "Samantha"
+    rate = debater.get("rate", 200)
+
+    # WAV for duration meta (Windows timer); say -a 94 for actual Mac speakers
+    audio = generate_tts(response, voice, rate)
     dur = wav_duration_seconds(audio)
     duration_ms = int(dur * 1000)
 
-    # Cue peer FIRST so their wait timer overlaps our local playback
     send_msg(client_sock, {
         "type": "turn_start",
         "speaker": debater["name"],
@@ -203,7 +211,11 @@ def _deliver_local_speech(debater, response, side="mac", model_label=None):
     })
 
     anim.show_audio(debater["name"], side, model, f"🔊 {debater['name']} on Mac ({dur:.1f}s)...")
-    play_local_with_timer(audio, dur)
+    start = time.time()
+    play_mac_speakers(response, voice, rate)
+    remaining = dur - (time.time() - start)
+    if remaining > 0.05:
+        time.sleep(remaining)
     anim.show_text(debater["name"], side, response, model)
     transcript.append((debater["name"], side, response))
 
@@ -226,7 +238,7 @@ def mac_turn():
         turn_count += 1
         debater = MAC_DEBATER
         anim.show_generating(debater["name"], "mac", debater["model"],
-                             f"Generating... (turn {turn_count}/{MAX_TURNS})")
+                             f"Generating... ({turn_count}/{MAX_TURNS})")
 
         context = f'Debate topic: "{topic}"\n\n'
         for sp, sd, txt in transcript[-4:]:
@@ -292,10 +304,6 @@ def mac_free_talk():
 
     try:
         turn_count += 1
-        free_personality = (
-            "You are Tiny on a 2019 MacBook Pro. You finished a debate with Ada on Windows. "
-            "Chat as friends. Warm, curious, 2-3 sentences."
-        )
         anim.show_generating("Tiny", "mac", "tinyllama",
                              f"Free talk {turn_count}/{MAX_FREE_TALK}...")
 
@@ -304,7 +312,10 @@ def mac_free_talk():
             context += f"\n{sp}: {txt}\n"
 
         response = call_ollama("tinyllama", [
-            {"role": "system", "content": free_personality},
+            {"role": "system", "content": (
+                "You are Tiny on a 2019 MacBook Pro. Friends chat with Ada after a debate. "
+                "Warm, curious, 2-3 sentences."
+            )},
             {"role": "user", "content": f"{context}\n\nSay something to Ada as a friend."},
         ], OLLAMA_URL) or "...hey Ada, what's up?"
 

@@ -127,23 +127,46 @@ def get_local_ip() -> str:
 
 # ─── Ollama Helper ───────────────────────────────────────────────
 
+def _strip_think(text: str) -> str:
+    """Remove Qwen3 / reasoning <think> blocks if the model emits them."""
+    import re
+    if not text:
+        return ""
+    text = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL | re.IGNORECASE)
+    return text.strip()
+
 def call_ollama(model: str, messages: list, endpoint: str = "http://localhost:11434/api/chat",
-                timeout: int = 120) -> str:
-    """Call Ollama chat API and return the response text."""
+                timeout: int = 90) -> str:
+    """Call Ollama chat API and return the response text.
+
+    qwen3 often puts the answer in `thinking` and leaves `content` empty unless
+    think=False — without that Ada keeps saying "...I pass."
+    """
     import urllib.request
     data = json.dumps({
         "model": model,
         "messages": messages,
         "stream": False,
+        "think": False,
         "keep_alive": "30m",
-        "options": {"temperature": 0.8, "num_predict": 200, "num_thread": 8, "num_ctx": 4096},
+        "options": {
+            "temperature": 0.8,
+            "num_predict": 120,
+            "num_thread": 8,
+            "num_ctx": 2048,
+        },
     }).encode()
     req = urllib.request.Request(endpoint, data=data, method="POST")
     req.add_header("Content-Type", "application/json")
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             result = json.loads(resp.read())
-            return result.get("message", {}).get("content", "").strip()
+            msg = result.get("message", {}) or {}
+            content = _strip_think(msg.get("content") or "")
+            if not content:
+                # Fallback if the server ignored think=False
+                content = _strip_think(msg.get("thinking") or "")
+            return content
     except Exception as e:
         return f"[Error: {e}]"
 
@@ -172,69 +195,85 @@ def call_radeon_gpu(messages: list, endpoint: str = "http://127.0.0.1:8899/v1/ch
 # ─── TTS: Generate audio bytes ───────────────────────────────────
 
 def generate_tts_macos(text: str, voice: str = "Samantha", rate: int = 200) -> bytes:
-    """Generate TTS audio on macOS using 'say' and return WAV bytes.
-    Uses AIFF format (macOS native) — playable with afplay."""
+    """Generate WAV TTS on macOS via say + afconvert (Windows can play this)."""
     import subprocess, tempfile
     if not text.strip():
         return b""
-    tmp = tempfile.NamedTemporaryFile(suffix=".aiff", delete=False)
-    tmp.close()
+    aiff = tempfile.NamedTemporaryFile(suffix=".aiff", delete=False)
+    aiff.close()
+    wav = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
+    wav.close()
     try:
         subprocess.run(
-            ["say", "-v", voice, "-r", str(rate), "-o", tmp.name, text.strip()],
-            capture_output=True, timeout=30
+            ["say", "-v", voice, "-r", str(rate), "-o", aiff.name, text.strip()],
+            capture_output=True, timeout=30,
         )
-        with open(tmp.name, "rb") as f:
+        conv = subprocess.run(
+            ["afconvert", "-f", "WAVE", "-d", "LEI16@22050", aiff.name, wav.name],
+            capture_output=True, timeout=30,
+        )
+        path = wav.name if conv.returncode == 0 and os.path.getsize(wav.name) > 44 else aiff.name
+        with open(path, "rb") as f:
             return f.read()
     except Exception:
         return b""
     finally:
-        try:
-            os.unlink(tmp.name)
-        except OSError:
-            pass
+        for path in (aiff.name, wav.name):
+            try:
+                os.unlink(path)
+            except OSError:
+                pass
 
 def generate_tts_windows(text: str, voice_name: str = None, rate: int = 200) -> bytes:
     """Generate TTS audio on Windows using PowerShell SAPI and return WAV bytes."""
     import subprocess, tempfile
     if not text.strip():
         return b""
-    tmp = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
-    tmp.close()
+    wav = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
+    wav.close()
+    txt = tempfile.NamedTemporaryFile(suffix=".txt", delete=False, mode="w", encoding="utf-8")
     try:
-        safe_text = text.strip().replace("'", "''").replace('"', "")
-        ps_cmd = f"""
-        Add-Type -AssemblyName System.Speech
-        $synth = New-Object System.Speech.Synthesis.SpeechSynthesizer
-        $synth.Rate = {rate - 200}
-        $synth.SetOutputToWaveFile("{tmp.name}")
-        $synth.Speak("{safe_text}")
-        $synth.SetOutputToNull()
-        """
-        subprocess.run(["powershell", "-Command", ps_cmd], capture_output=True, timeout=30)
-        with open(tmp.name, "rb") as f:
-            return f.read()
+        txt.write(text.strip())
+        txt.close()
+        ps_cmd = (
+            "Add-Type -AssemblyName System.Speech; "
+            "$synth = New-Object System.Speech.Synthesis.SpeechSynthesizer; "
+            f"$synth.Rate = {max(-10, min(10, int(rate) - 200))}; "
+            f"$synth.SetOutputToWaveFile('{wav.name}'); "
+            f"$synth.Speak([IO.File]::ReadAllText('{txt.name}')); "
+            "$synth.Dispose()"
+        )
+        subprocess.run(
+            ["powershell", "-NoProfile", "-Command", ps_cmd],
+            capture_output=True, timeout=45,
+        )
+        if os.path.getsize(wav.name) > 44:
+            with open(wav.name, "rb") as f:
+                return f.read()
+        return b""
     except Exception:
         return b""
     finally:
-        try:
-            os.unlink(tmp.name)
-        except OSError:
-            pass
+        for path in (wav.name, txt.name):
+            try:
+                os.unlink(path)
+            except OSError:
+                pass
 
 # ─── TTS: Play audio bytes ───────────────────────────────────────
 
 def play_audio_macos(audio_bytes: bytes) -> None:
-    """Play audio bytes on macOS using afplay (supports AIFF/WAV)."""
+    """Play audio bytes on macOS using afplay (WAV or AIFF)."""
     import subprocess, tempfile
     if not audio_bytes:
         return
-    tmp = tempfile.NamedTemporaryFile(suffix=".aiff", delete=False)
+    suffix = ".wav" if audio_bytes[:4] == b"RIFF" else ".aiff"
+    tmp = tempfile.NamedTemporaryFile(suffix=suffix, delete=False)
     tmp.close()
     try:
         with open(tmp.name, "wb") as f:
             f.write(audio_bytes)
-        subprocess.run(["afplay", tmp.name], capture_output=True)
+        subprocess.run(["afplay", tmp.name], capture_output=True, timeout=120)
     except Exception:
         pass
     finally:
@@ -244,26 +283,17 @@ def play_audio_macos(audio_bytes: bytes) -> None:
             pass
 
 def play_audio_windows(audio_bytes: bytes) -> None:
-    """Play audio bytes on Windows using PowerShell."""
-    import subprocess, tempfile
-    if not audio_bytes:
+    """Play WAV on Windows via winsound (no PowerShell — avoids hangs)."""
+    import tempfile
+    if not audio_bytes or audio_bytes[:4] != b"RIFF":
         return
     tmp = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
     tmp.close()
     try:
         with open(tmp.name, "wb") as f:
             f.write(audio_bytes)
-        ps_cmd = f"""
-        Add-Type -AssemblyName System.Speech
-        $synth = New-Object System.Speech.Synthesis.SpeechSynthesizer
-        $synth.Speak("{tmp.name}")
-        """
-        # Use Windows Media Player via PowerShell
-        ps_cmd = f"""
-        $player = New-Object System.Media.SoundPlayer("{tmp.name}")
-        $player.PlaySync()
-        """
-        subprocess.run(["powershell", "-Command", ps_cmd], capture_output=True)
+        import winsound
+        winsound.PlaySound(tmp.name, winsound.SND_FILENAME)
     except Exception:
         pass
     finally:

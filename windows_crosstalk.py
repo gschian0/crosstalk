@@ -26,9 +26,19 @@ import sys
 import os
 import time
 
+# Windows consoles default to cp1252 — force UTF-8 for emojis / box drawing
+if sys.platform == "win32":
+    os.environ.setdefault("PYTHONIOENCODING", "utf-8")
+    os.environ.setdefault("PYTHONUTF8", "1")
+    try:
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+        sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
+
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from crosstalk_protocol import (
-    send_msg, recv_msgs, call_ollama,
+    send_msg, send_audio, recv_msgs, call_ollama,
     generate_tts, play_audio, is_windows,
 )
 from crosstalk_anim import SpeakerAnimation, Colors
@@ -55,12 +65,15 @@ WIN_DEBATER = {
 
 # ─── State ───────────────────────────────────────────────────────
 connected = False
+handshake_done = False
 sock = None
 topic = "Is pizza better than tacos?"
 transcript = []
 turn_count = 0
+pending_audio = None
+turn_done_event = threading.Event()  # Mac uses turn_done — never "heard"
+speak_lock = threading.Lock()  # only one Ada turn at a time
 anim = SpeakerAnimation()
-_temp_done_callback = None
 MAX_FREE_TALK = 10
 
 def print_banner():
@@ -78,85 +91,108 @@ def print_banner():
     print()
 
 def on_message(msg, audio_bytes):
-    """Handle incoming messages from Mac."""
-    global connected, topic, turn_count
-
-    # Check for temporary done callback (used for turn synchronization)
-    if _temp_done_callback:
-        _temp_done_callback(msg, audio_bytes)
+    """Socket thread — keep it fast. Playback/Ollama run on worker threads."""
+    global connected, handshake_done, topic, turn_count, pending_audio
 
     mtype = msg.get("type")
 
+    if mtype == "turn_done":
+        turn_done_event.set()
+        return
+
     if mtype == "hello":
+        # Hello already sent on connect — don't echo or Mac can restart the debate
+        if handshake_done:
+            return
+        handshake_done = True
+        connected = True
         anim.show_info(f"✅ Mac connected: {msg.get('name', 'Unknown')}", Colors.BBLUE)
         anim.show_info(f"🤖 Mac debaters: {msg.get('models', 'Unknown')}", Colors.BBLUE)
-        connected = True
-        # Send our hello back
-        send_msg(sock, {
-            "type": "hello",
-            "side": "windows",
-            "name": "HP OmniBook Ultra",
-            "models": [WIN_DEBATER["name"]],
-        })
+        return
 
-    elif mtype == "topic":
+    if mtype == "topic":
         topic = msg.get("topic", topic)
         anim.show_info(f"📝 Topic received: {topic}")
         anim.show_separator()
-        # Wait for Mac to go first — they'll send a turn
+        return
 
-    elif mtype == "turn_start":
-        # Mac is about to send audio + text
+    if mtype == "turn_start":
+        # Audio bytes arrive with turn_start — stash for the following text
+        pending_audio = audio_bytes or b""
         speaker = msg.get("speaker", "Mac")
         side = msg.get("side", "mac")
         model = msg.get("model", "?")
-        anim.show_audio(speaker, side, model, "Streaming audio from Mac...")
+        anim.show_audio(speaker, side, model, "Receiving audio from Mac...")
+        return
 
-    elif mtype == "text":
-        speaker = msg.get("speaker", "Mac")
-        text = msg.get("text", "")
-        side = msg.get("side", "mac")
-        model = msg.get("model", "?")
+    if mtype == "text":
+        audio = pending_audio if pending_audio is not None else (audio_bytes or b"")
+        pending_audio = None
+        threading.Thread(
+            target=handle_peer_text,
+            args=(msg, audio),
+            daemon=True,
+            name="peer-text",
+        ).start()
+        return
 
-        # Play the streamed audio
-        if audio_bytes:
-            play_audio(audio_bytes)
+    if mtype == "done":
+        anim.show_info("✅ Mac side is done. Debate complete!", Colors.BGREEN)
+        connected = False
+        turn_done_event.set()
+        return
+
+    if mtype == "bye":
+        anim.show_info("👋 Mac disconnected.", Colors.DIM)
+        connected = False
+        turn_done_event.set()
+
+
+def handle_peer_text(msg, audio):
+    """Play Mac audio, ack turn_done, then take Ada's turn (never on socket thread)."""
+    global turn_count
+
+    speaker = msg.get("speaker", "Mac")
+    text = msg.get("text", "")
+    side = msg.get("side", "mac")
+    model = msg.get("model", "?")
+
+    # Serialize: don't start Ada while previous Ada (or free talk) is still running
+    if not speak_lock.acquire(blocking=False):
+        anim.show_info("⏳ Ada busy — skipping overlapping cue", Colors.YELLOW)
+        # Still ack so Mac can unblock
+        send_msg(sock, {"type": "turn_done", "side": "windows"})
+        return
+
+    try:
+        anim.show_audio(speaker, side, model, "🎧 Playing Mac...")
+        if audio and audio[:4] == b"RIFF":
+            play_audio(audio)
+        elif audio:
+            # AIFF from Mac — still ack timely so Tiny doesn't race ahead
+            anim.show_info("⚠️ Mac audio not WAV — ack only (Mac: afconvert to WAV)", Colors.YELLOW)
 
         anim.show_text(speaker, side, text, model)
         transcript.append((speaker, side, text))
 
-        # Tell Mac we finished playing their audio
         send_msg(sock, {"type": "turn_done", "side": "windows"})
 
-        # If it's from the judge, start free talk
         if side == "judge":
             anim.show_separator("═")
             anim.show_info(f"🏁 Debate complete! {len(transcript)} turns.", Colors.BGREEN)
             anim.show_separator("─")
-            anim.show_info("💬 FREE TALK — Ada and Tiny are now chatting as friends...", Colors.BCYAN)
-            anim.show_info("   They'll keep talking with full context. Press Ctrl+C to stop.", Colors.DIM)
+            anim.show_info("💬 FREE TALK — Ada and Tiny chatting as friends...", Colors.BCYAN)
+            anim.show_info("   Press Ctrl+C to stop.", Colors.DIM)
             anim.show_separator("─")
-            print()
-            # Add verdict to transcript
-            transcript.append((speaker, side, text))
-            # Reset turn counter for free talk
             turn_count = 0
-            return  # Wait for Mac to start free talk
+            return
 
-        # If it's free talk from Mac, respond in kind
-        if "free talk" in model.lower():
-            threading.Thread(target=windows_free_talk, daemon=True).start()
+        if "free talk" in (model or "").lower():
+            windows_free_talk()
         else:
-            # Windows' debate turn to respond
-            threading.Thread(target=windows_turn, daemon=True).start()
-
-    elif mtype == "done":
-        anim.show_info("✅ Mac side is done. Debate complete!", Colors.BGREEN)
-        connected = False
-
-    elif mtype == "bye":
-        anim.show_info("👋 Mac disconnected.", Colors.DIM)
-        connected = False
+            windows_turn()
+    finally:
+        speak_lock.release()
 
 def windows_turn():
     """Windows generates and sends its turn with streaming audio."""
@@ -174,24 +210,33 @@ def windows_turn():
     anim.show_generating(debater["name"], "windows", debater["model"],
                          f"Generating on ROCm... (turn {turn_count}/{MAX_TURNS})")
 
-    # Build context from transcript
     context = f"Debate topic: \"{topic}\"\n\n"
     for sp, sd, txt in transcript:
         context += f"\n{sp} ({sd}): {txt}\n"
 
     messages = [
         {"role": "system", "content": debater["personality"]},
-        {"role": "user", "content": f"{context}\n\nYour turn, {debater['name']}. Respond to the debate. 2-3 sentences. Finish your thought."},
+        {"role": "user", "content": (
+            f"{context}\n\nYour turn, {debater['name']}. "
+            "Respond to the debate in 2-3 short sentences. Do not refuse. Finish your thought."
+        )},
     ]
 
     response = call_ollama(debater["model"], messages, OLLAMA_URL)
     if not response:
-        response = "...I pass."
+        anim.show_info("⚠️ Ada got empty Ollama content — retrying once...", Colors.YELLOW)
+        response = call_ollama(debater["model"], messages, OLLAMA_URL)
+    if not response:
+        response = (
+            "My stack hiccuped for a second, but I'm still in this — "
+            "modern silicon doesn't pass on pizza vs tacos debates."
+        )
+    elif response.startswith("[Error:"):
+        anim.show_info(f"⚠️ Ollama: {response}", Colors.YELLOW)
 
-    # Generate TTS audio
+    anim.show_generating(debater["name"], "windows", debater["model"], "Generating TTS...")
     audio = generate_tts(response, debater["voice"], debater["rate"])
 
-    # Send turn_start (signals audio is coming)
     send_msg(sock, {
         "type": "turn_start",
         "speaker": debater["name"],
@@ -199,11 +244,8 @@ def windows_turn():
         "model": debater["model"],
     })
 
-    # Stream audio to Mac
-    from crosstalk_protocol import send_audio
-    send_audio(sock, audio)
-
-    # Send the text
+    turn_done_event.clear()
+    send_audio(sock, audio or b"")
     send_msg(sock, {
         "type": "text",
         "speaker": debater["name"],
@@ -212,24 +254,15 @@ def windows_turn():
         "model": debater["model"],
     })
 
-    # Wait for Mac to finish playing our audio before we play locally
-    import threading as _t
-    done_event = _t.Event()
-    global _temp_done_callback
-    def wait_for_done(msg, audio):
-        if msg.get("type") == "turn_done":
-            done_event.set()
-    _temp_done_callback = wait_for_done
-    done_event.wait(timeout=30)
-    _temp_done_callback = None
+    anim.show_info("⏳ Waiting for Mac turn_done...", Colors.DIM)
+    if not turn_done_event.wait(timeout=30):
+        anim.show_info("⚠️ Mac turn_done timeout — continuing", Colors.YELLOW)
 
-    # Now play locally
     anim.show_audio(debater["name"], "windows", debater["model"], "Playing locally...")
     play_audio(audio)
     anim.show_text(debater["name"], "windows", response, debater["model"])
     transcript.append((debater["name"], "windows", response))
 
-    # If we've reached max turns, signal done
     if turn_count >= MAX_TURNS:
         send_msg(sock, {"type": "done", "side": "windows"})
         anim.show_info(f"🏁 Windows side complete! {turn_count} turns delivered.", Colors.BGREEN)
@@ -281,7 +314,7 @@ def windows_free_talk():
         "side": "windows",
         "model": "qwen3:1.7b (free talk)",
     })
-    from crosstalk_protocol import send_audio
+    turn_done_event.clear()
     send_audio(sock, audio)
     send_msg(sock, {
         "type": "text",
@@ -291,16 +324,9 @@ def windows_free_talk():
         "model": "qwen3:1.7b (free talk)",
     })
 
-    # Wait for Mac to finish playing
-    import threading as _t
-    done_event = _t.Event()
-    global _temp_done_callback
-    def wait_for_done(msg, audio):
-        if msg.get("type") == "turn_done":
-            done_event.set()
-    _temp_done_callback = wait_for_done
-    done_event.wait(timeout=30)
-    _temp_done_callback = None
+    anim.show_info("⏳ Waiting for Mac turn_done...", Colors.DIM)
+    if not turn_done_event.wait(timeout=30):
+        anim.show_info("⚠️ Mac turn_done timeout — continuing", Colors.YELLOW)
 
     anim.show_audio("Ada", "windows", "qwen3:1.7b (free talk)", "Playing locally...")
     play_audio(audio)
@@ -314,6 +340,7 @@ def windows_free_talk():
 def on_disconnect():
     global connected
     connected = False
+    turn_done_event.set()
     anim.show_info("❌ Connection lost.", Colors.RED)
 
 def main():

@@ -66,12 +66,15 @@ RADEON_JUDGE = {
 
 # ─── State ───────────────────────────────────────────────────────
 connected = False
+handshake_done = False
 client_sock = None
 topic = "Is pizza better than tacos?"
 transcript = []
 turn_count = 0
+pending_audio = None
+turn_done_event = threading.Event()
+speak_lock = threading.Lock()  # Tiny must not stack / overlap himself
 anim = SpeakerAnimation()
-_temp_done_callback = None
 MAX_FREE_TALK = 10
 
 def print_banner():
@@ -93,78 +96,96 @@ def print_banner():
     print()
 
 def on_message(msg, audio_bytes):
-    """Handle incoming messages from Windows."""
-    global connected, turn_count
-
-    # Check for temporary done callback (used for turn synchronization)
-    if _temp_done_callback:
-        _temp_done_callback(msg, audio_bytes)
+    """Socket thread — keep it fast. No TTS / Ollama / play_audio here."""
+    global connected, handshake_done, turn_count, pending_audio
 
     mtype = msg.get("type")
 
+    if mtype == "turn_done":
+        turn_done_event.set()
+        return
+
     if mtype == "hello":
+        if handshake_done:
+            return
+        handshake_done = True
+        connected = True
         anim.show_info(f"✅ Windows connected: {msg.get('name', 'Unknown')}", Colors.BGREEN)
         anim.show_info(f"🤖 Windows debater: {msg.get('models', 'Unknown')}", Colors.BGREEN)
-        connected = True
-        # Send our hello back
         send_msg(client_sock, {
             "type": "hello",
             "side": "mac",
             "name": "MacBook Pro 2019",
             "models": [MAC_DEBATER["name"], RADEON_JUDGE["name"]],
         })
-        # Send the topic
         send_msg(client_sock, {"type": "topic", "topic": topic})
         anim.show_info(f"📤 Topic sent to Windows: {topic}")
         anim.show_separator()
-        # Mac goes first — start the debate
-        threading.Thread(target=mac_turn, daemon=True).start()
+        threading.Thread(target=mac_turn, daemon=True, name="mac-open").start()
+        return
 
-    elif mtype == "turn_start":
-        # Windows is about to send audio + text
+    if mtype == "turn_start":
+        pending_audio = audio_bytes or b""
         speaker = msg.get("speaker", "Windows")
         side = msg.get("side", "windows")
         model = msg.get("model", "?")
-        anim.show_audio(speaker, side, model, "Streaming audio from Windows...")
+        anim.show_audio(speaker, side, model, "Receiving audio from Windows...")
+        return
 
-    elif mtype == "text":
-        speaker = msg.get("speaker", "Windows")
-        text = msg.get("text", "")
-        side = msg.get("side", "windows")
-        model = msg.get("model", "?")
+    if mtype == "text":
+        audio = pending_audio if pending_audio is not None else (audio_bytes or b"")
+        pending_audio = None
+        threading.Thread(
+            target=handle_peer_text,
+            args=(msg, audio),
+            daemon=True,
+            name="peer-text",
+        ).start()
+        return
 
-        # Play the streamed audio
-        if audio_bytes:
-            play_audio(audio_bytes)
+    if mtype == "done":
+        anim.show_info("✅ Windows side is done.", Colors.BGREEN)
+        return
 
+    if mtype == "bye":
+        anim.show_info("👋 Windows disconnected.", Colors.DIM)
+        connected = False
+        turn_done_event.set()
+
+
+def handle_peer_text(msg, audio):
+    """Hear Ada fully, ack, then Tiny responds — one at a time."""
+    global turn_count
+
+    speaker = msg.get("speaker", "Windows")
+    text = msg.get("text", "")
+    side = msg.get("side", "windows")
+    model = msg.get("model", "?")
+
+    if not speak_lock.acquire(blocking=False):
+        anim.show_info("⏳ Tiny busy — ack only (no overlap)", Colors.YELLOW)
+        send_msg(client_sock, {"type": "turn_done", "side": "mac"})
+        return
+
+    try:
+        anim.show_audio(speaker, side, model, "🎧 Playing Windows...")
+        if audio:
+            play_audio(audio)
         anim.show_text(speaker, side, text, model)
         transcript.append((speaker, side, text))
 
-        # Tell Windows we finished playing their audio
         send_msg(client_sock, {"type": "turn_done", "side": "mac"})
 
-        # If it's from the judge, start free talk phase
         if side == "judge":
-            # Judge verdict done — free talk starts from mac_free_talk() in judge_verdict()
             return
 
-        # If it's free talk from Windows (model contains "free talk"), respond in kind
-        if "free talk" in model.lower():
-            threading.Thread(target=mac_free_talk, daemon=True).start()
+        if "free talk" in (model or "").lower():
+            mac_free_talk()
         else:
-            # Mac's debate turn to respond
-            threading.Thread(target=mac_turn, daemon=True).start()
+            mac_turn()
+    finally:
+        speak_lock.release()
 
-    elif mtype == "turn_done":
-        # Windows finished playing our audio — now we can play it locally
-        pass  # Handled in mac_turn() via threading event
-
-    elif mtype == "done":
-        anim.show_info("✅ Windows side is done.", Colors.BGREEN)
-
-    elif mtype == "bye":
-        anim.show_info("👋 Windows disconnected.", Colors.DIM)
-        connected = False
 
 def mac_turn():
     """Mac generates and sends its turn with streaming audio."""
@@ -177,73 +198,70 @@ def mac_turn():
     if not connected or not client_sock:
         return
 
-    turn_count += 1
-    debater = MAC_DEBATER
+    # Opening turn needs the lock; reply path already holds it via handle_peer_text
+    acquired = False
+    if threading.current_thread().name == "mac-open":
+        if not speak_lock.acquire(timeout=5):
+            anim.show_info("⚠️ Could not acquire speak lock for opening turn", Colors.YELLOW)
+            return
+        acquired = True
 
-    anim.show_generating(debater["name"], "mac", debater["model"],
-                         f"Generating on Intel CPU... (turn {turn_count}/{MAX_TURNS})")
+    try:
+        turn_count += 1
+        debater = MAC_DEBATER
 
-    # Build context from transcript
-    context = f"Debate topic: \"{topic}\"\n\n"
-    for sp, sd, txt in transcript:
-        context += f"\n{sp} ({sd}): {txt}\n"
+        anim.show_generating(debater["name"], "mac", debater["model"],
+                             f"Generating on Intel CPU... (turn {turn_count}/{MAX_TURNS})")
 
-    messages = [
-        {"role": "system", "content": debater["personality"]},
-        {"role": "user", "content": f"{context}\n\nYour turn, {debater['name']}. Respond to the debate. 2-3 sentences. Finish your thought."},
-    ]
+        context = f"Debate topic: \"{topic}\"\n\n"
+        for sp, sd, txt in transcript:
+            context += f"\n{sp} ({sd}): {txt}\n"
 
-    response = call_ollama(debater["model"], messages, OLLAMA_URL)
-    if not response:
-        response = "...I pass."
+        messages = [
+            {"role": "system", "content": debater["personality"]},
+            {"role": "user", "content": (
+                f"{context}\n\nYour turn, {debater['name']}. "
+                "Respond in 2-3 short sentences. Finish your thought."
+            )},
+        ]
 
-    # Generate TTS audio
-    audio = generate_tts(response, debater["voice"], debater["rate"])
+        response = call_ollama(debater["model"], messages, OLLAMA_URL)
+        if not response:
+            response = "...I pass."
 
-    # Send turn_start (signals audio is coming)
-    send_msg(client_sock, {
-        "type": "turn_start",
-        "speaker": debater["name"],
-        "side": "mac",
-        "model": debater["model"],
-    })
+        audio = generate_tts(response, debater["voice"], debater["rate"])
 
-    # Stream audio to Windows
-    from crosstalk_protocol import send_audio
-    send_audio(client_sock, audio)
+        send_msg(client_sock, {
+            "type": "turn_start",
+            "speaker": debater["name"],
+            "side": "mac",
+            "model": debater["model"],
+        })
+        turn_done_event.clear()
+        from crosstalk_protocol import send_audio
+        send_audio(client_sock, audio or b"")
+        send_msg(client_sock, {
+            "type": "text",
+            "speaker": debater["name"],
+            "side": "mac",
+            "text": response,
+            "model": debater["model"],
+        })
 
-    # Send the text
-    send_msg(client_sock, {
-        "type": "text",
-        "speaker": debater["name"],
-        "side": "mac",
-        "text": response,
-        "model": debater["model"],
-    })
+        anim.show_info("⏳ Waiting for Windows turn_done...", Colors.DIM)
+        if not turn_done_event.wait(timeout=30):
+            anim.show_info("⚠️ Windows turn_done timeout — continuing", Colors.YELLOW)
 
-    # Wait for Windows to finish playing our audio before we play locally
-    # This ensures turns are sequential, not simultaneous
-    # We use a simple timeout approach: wait for turn_done or 10s max
-    done_event = threading.Event()
-    original_callback = None
-    def wait_for_done(msg, audio):
-        if msg.get("type") == "turn_done":
-            done_event.set()
-    # Register a temporary callback by patching on_message
-    global _temp_done_callback
-    _temp_done_callback = wait_for_done
-    done_event.wait(timeout=30)  # Wait up to 30s for Windows to finish
-    _temp_done_callback = None
+        anim.show_audio(debater["name"], "mac", debater["model"], "🔊 Speaking locally...")
+        play_audio(audio)
+        anim.show_text(debater["name"], "mac", response, debater["model"])
+        transcript.append((debater["name"], "mac", response))
 
-    # Now play locally
-    anim.show_audio(debater["name"], "mac", debater["model"], "Playing locally...")
-    play_audio(audio)
-    anim.show_text(debater["name"], "mac", response, debater["model"])
-    transcript.append((debater["name"], "mac", response))
-
-    # Check if debate is over
-    if turn_count >= MAX_TURNS:
-        threading.Thread(target=judge_verdict, daemon=True).start()
+        if turn_count >= MAX_TURNS:
+            judge_verdict()
+    finally:
+        if acquired:
+            speak_lock.release()
 
 def judge_verdict():
     """The Radeon Governor delivers the verdict with streaming audio."""
@@ -374,8 +392,9 @@ def mac_free_talk():
         "side": "mac",
         "model": "tinyllama (free talk)",
     })
+    turn_done_event.clear()
     from crosstalk_protocol import send_audio
-    send_audio(client_sock, audio)
+    send_audio(client_sock, audio or b"")
     send_msg(client_sock, {
         "type": "text",
         "speaker": "Tiny",
@@ -384,15 +403,9 @@ def mac_free_talk():
         "model": "tinyllama (free talk)",
     })
 
-    # Wait for Windows to finish playing
-    done_event = threading.Event()
-    global _temp_done_callback
-    def wait_for_done(msg, audio):
-        if msg.get("type") == "turn_done":
-            done_event.set()
-    _temp_done_callback = wait_for_done
-    done_event.wait(timeout=30)
-    _temp_done_callback = None
+    anim.show_info("⏳ Waiting for Windows turn_done...", Colors.DIM)
+    if not turn_done_event.wait(timeout=30):
+        anim.show_info("⚠️ Windows turn_done timeout — continuing", Colors.YELLOW)
 
     anim.show_audio("Tiny", "mac", "tinyllama (free talk)", "Playing locally...")
     play_audio(audio)
@@ -406,6 +419,7 @@ def mac_free_talk():
 def on_disconnect():
     global connected
     connected = False
+    turn_done_event.set()
     anim.show_info("❌ Connection lost.", Colors.RED)
 
 def main():

@@ -71,6 +71,7 @@ topic = "Is pizza better than tacos?"
 transcript = []
 turn_count = 0
 anim = SpeakerAnimation()
+_temp_done_callback = None
 
 def print_banner():
     ip = get_local_ip()
@@ -93,6 +94,10 @@ def print_banner():
 def on_message(msg, audio_bytes):
     """Handle incoming messages from Windows."""
     global connected, turn_count
+
+    # Check for temporary done callback (used for turn synchronization)
+    if _temp_done_callback:
+        _temp_done_callback(msg, audio_bytes)
 
     mtype = msg.get("type")
 
@@ -134,8 +139,15 @@ def on_message(msg, audio_bytes):
         anim.show_text(speaker, side, text, model)
         transcript.append((speaker, side, text))
 
+        # Tell Windows we finished playing their audio
+        send_msg(client_sock, {"type": "turn_done", "side": "mac"})
+
         # Mac's turn to respond
         threading.Thread(target=mac_turn, daemon=True).start()
+
+    elif mtype == "turn_done":
+        # Windows finished playing our audio — now we can play it locally
+        pass  # Handled in mac_turn() via threading event
 
     elif mtype == "done":
         anim.show_info("✅ Windows side is done.", Colors.BGREEN)
@@ -199,7 +211,21 @@ def mac_turn():
         "model": debater["model"],
     })
 
-    # Play locally
+    # Wait for Windows to finish playing our audio before we play locally
+    # This ensures turns are sequential, not simultaneous
+    # We use a simple timeout approach: wait for turn_done or 10s max
+    done_event = threading.Event()
+    original_callback = None
+    def wait_for_done(msg, audio):
+        if msg.get("type") == "turn_done":
+            done_event.set()
+    # Register a temporary callback by patching on_message
+    global _temp_done_callback
+    _temp_done_callback = wait_for_done
+    done_event.wait(timeout=30)  # Wait up to 30s for Windows to finish
+    _temp_done_callback = None
+
+    # Now play locally
     anim.show_audio(debater["name"], "mac", debater["model"], "Playing locally...")
     play_audio(audio)
     anim.show_text(debater["name"], "mac", response, debater["model"])

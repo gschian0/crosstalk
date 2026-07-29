@@ -60,6 +60,7 @@ topic = "Is pizza better than tacos?"
 transcript = []
 turn_count = 0
 anim = SpeakerAnimation()
+_temp_done_callback = None
 
 def print_banner():
     print()
@@ -78,6 +79,10 @@ def print_banner():
 def on_message(msg, audio_bytes):
     """Handle incoming messages from Mac."""
     global connected, topic, turn_count
+
+    # Check for temporary done callback (used for turn synchronization)
+    if _temp_done_callback:
+        _temp_done_callback(msg, audio_bytes)
 
     mtype = msg.get("type")
 
@@ -118,6 +123,9 @@ def on_message(msg, audio_bytes):
 
         anim.show_text(speaker, side, text, model)
         transcript.append((speaker, side, text))
+
+        # Tell Mac we finished playing their audio
+        send_msg(sock, {"type": "turn_done", "side": "windows"})
 
         # If it's from the judge, don't respond — debate is over
         if side == "judge":
@@ -190,7 +198,18 @@ def windows_turn():
         "model": debater["model"],
     })
 
-    # Play locally
+    # Wait for Mac to finish playing our audio before we play locally
+    import threading as _t
+    done_event = _t.Event()
+    global _temp_done_callback
+    def wait_for_done(msg, audio):
+        if msg.get("type") == "turn_done":
+            done_event.set()
+    _temp_done_callback = wait_for_done
+    done_event.wait(timeout=30)
+    _temp_done_callback = None
+
+    # Now play locally
     anim.show_audio(debater["name"], "windows", debater["model"], "Playing locally...")
     play_audio(audio)
     anim.show_text(debater["name"], "windows", response, debater["model"])

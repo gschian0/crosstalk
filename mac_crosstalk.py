@@ -18,7 +18,7 @@ import subprocess
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from crosstalk_protocol import (
     send_msg, send_audio, recv_msgs, get_local_ip, call_ollama, call_radeon_gpu,
-    generate_tts, wav_duration_seconds, play_local_with_timer,
+    build_conversation_messages, generate_tts, wav_duration_seconds, play_local_with_timer,
 )
 from crosstalk_anim import SpeakerAnimation, Colors
 
@@ -26,7 +26,7 @@ HOST_PORT = 9999
 OLLAMA_URL = "http://localhost:11434/api/chat"
 AUDIO_DEVICE = "94"  # MacBook speakers
 MAX_TURNS = 6
-MAX_FREE_TALK = 10
+MAX_FREE_TALK = 40  # soft ceiling so free talk can keep evolving
 
 MAC_DEBATER = {
     "name": "Tiny",
@@ -252,26 +252,33 @@ def mac_turn():
         anim.show_generating(debater["name"], "mac", debater["model"],
                              f"Generating... ({turn_count}/{MAX_TURNS})")
 
-        context = f'Debate topic: "{topic}"\n\n'
-        for sp, sd, txt in transcript[-4:]:
-            context += f"\n{sp} ({sd}): {txt}\n"
-
-        # Round-specific instructions for evolving debate
         if turn_count == 1:
-            round_instr = (f"This is your OPENING STATEMENT, {debater['name']}. "
-                           f"State your position on the topic clearly. Be bold and specific. 2-3 sentences.")
+            round_instr = (
+                f"This is your OPENING STATEMENT, {debater['name']}. "
+                "State your position on the topic clearly. Be bold and specific. 2-3 sentences."
+            )
         elif turn_count >= MAX_TURNS - 1:
-            round_instr = (f"This is your CLOSING ARGUMENT, {debater['name']}. "
-                           f"Summarize why you won this debate. Reference specific things Ada said that you countered. 2-3 sentences.")
+            round_instr = (
+                f"This is your CLOSING ARGUMENT, {debater['name']}. "
+                "Summarize why you won this debate. Reference specific things Ada said that you countered. "
+                "2-3 sentences."
+            )
         else:
-            round_instr = (f"Your turn, {debater['name']}. RESPOND to what Ada just said — "
-                           f"disagree, counter her argument, or build on it. Don't just repeat your position. "
-                           f"Make this a real back-and-forth. 2-3 sentences.")
+            round_instr = (
+                f"Your turn, {debater['name']}. RESPOND to what Ada just said — "
+                "disagree, counter her argument, or build on it. Don't just repeat your position. "
+                "Make this a real back-and-forth. 2-3 sentences."
+            )
 
-        response = call_ollama(debater["model"], [
-            {"role": "system", "content": debater["personality"]},
-            {"role": "user", "content": f"{context}\n\n{round_instr}"},
-        ], OLLAMA_URL) or "...I pass."
+        messages = build_conversation_messages(
+            transcript,
+            self_name=debater["name"],
+            system=debater["personality"],
+            topic=topic,
+            mode="debate",
+            nudge=round_instr,
+        )
+        response = call_ollama(debater["model"], messages, OLLAMA_URL) or "...I pass."
 
         _deliver_local_speech(debater, response)
 
@@ -331,21 +338,27 @@ def mac_free_talk():
         anim.show_generating("Tiny", "mac", "tinyllama",
                              f"Free talk {turn_count}/{MAX_FREE_TALK}...")
 
-        context = f'Debated: "{topic}"\n\nRecent conversation:\n'
-        for sp, sd, txt in transcript[-4:]:
-            context += f"\n{sp}: {txt}\n"
-
-        response = call_ollama("tinyllama", [
-            {"role": "system", "content": (
+        messages = build_conversation_messages(
+            transcript,
+            self_name="Tiny",
+            system=(
                 "You are Tiny, a 1B AI on a 2019 MacBook Pro. You just finished a debate with Ada, "
                 "a modern AI on a Windows ROCm machine. Now you're chatting as friends after the debate. "
                 "Be warm, curious, and natural. Ask Ada about her hardware, her experiences running on ROCm, "
                 "or share stories about life on a 2019 Mac with 64GB RAM. "
                 "Reference things from the debate or things Ada just said. "
                 "Make this feel like a real evolving conversation, not scripted. 2-3 sentences."
-            )},
-            {"role": "user", "content": f"{context}\n\nRespond to Ada naturally — ask her something or share a thought about being an AI on old hardware."},
-        ], OLLAMA_URL) or "...hey Ada, what's up?"
+            ),
+            topic=topic,
+            mode="free_talk",
+            nudge=(
+                "Respond to Ada naturally — ask her something or share a thought "
+                "about being an AI on old hardware."
+            ),
+        )
+        response = call_ollama(
+            "tinyllama", messages, OLLAMA_URL, num_predict=160, temperature=0.9,
+        ) or "...hey Ada, what's up?"
 
         _deliver_local_speech(
             {"name": "Tiny", "voice": "Sandy", "rate": 270, "model": "tinyllama"},

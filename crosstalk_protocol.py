@@ -135,26 +135,111 @@ def _strip_think(text: str) -> str:
     text = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL | re.IGNORECASE)
     return text.strip()
 
+def build_conversation_messages(
+    transcript,
+    *,
+    self_name: str,
+    system: str,
+    topic: str = "",
+    mode: str = "debate",
+    recent_limit: int = 8,
+    nudge: str = None,
+):
+    """Turn local transcript into real multi-turn chat messages.
+
+    Sleight of hand (no extra model): older lines collapse into one short
+    recap; the last few turns stay as user/assistant so the dialogue can evolve.
+    transcript entries: (speaker, side, text)
+    Optional nudge overrides the final "your turn" instruction (e.g. round ops).
+    """
+    lines = [(sp, sd, (txt or "").strip()) for sp, sd, txt in transcript if (txt or "").strip()]
+    # Skip pure judge lines for debater/friend chat continuity
+    if mode != "judge":
+        lines = [(sp, sd, txt) for sp, sd, txt in lines if sd != "judge"]
+
+    if mode == "free_talk":
+        frame = (
+            f'You already debated "{topic}". Now you are hanging out as friends. '
+            "Reference earlier jokes and points when it feels natural. "
+            "Ask or answer follow-ups. Keep replies to 2-3 short sentences."
+        )
+        default_nudge = "Continue the conversation — react to what was just said."
+    elif mode == "debate":
+        frame = (
+            f'Debate topic: "{topic}". Stay on topic, push your angle, '
+            "and answer the other side's last points. 2-3 short sentences."
+        )
+        default_nudge = f"Your turn, {self_name}. Respond to the latest exchange."
+    else:
+        frame = f'Topic: "{topic}".'
+        default_nudge = "Continue."
+
+    nudge = (nudge or default_nudge).strip()
+    messages = [{"role": "system", "content": f"{system.strip()}\n\n{frame}".strip()}]
+
+    if not lines:
+        messages.append({"role": "user", "content": nudge})
+        return messages
+
+    recent = lines[-recent_limit:]
+    older = lines[:-recent_limit] if len(lines) > recent_limit else []
+
+    if older:
+        bits = [f"{sp}: {txt}" for sp, _sd, txt in older]
+        # Cap recap so tiny models stay inside num_ctx
+        recap = " | ".join(bits)
+        if len(recap) > 600:
+            recap = "… " + recap[-580:]
+        messages.append({
+            "role": "user",
+            "content": f"Earlier in this conversation:\n{recap}",
+        })
+        messages.append({
+            "role": "assistant",
+            "content": "Got it — I'll keep that in mind.",
+        })
+
+    for sp, _sd, txt in recent:
+        role = "assistant" if sp == self_name else "user"
+        # Label peer lines lightly so both names stay clear
+        content = txt if role == "assistant" else f"{sp}: {txt}"
+        # Merge consecutive same-role turns (Ollama is happier that way)
+        if messages and messages[-1]["role"] == role:
+            messages[-1]["content"] += f"\n{content}"
+        else:
+            messages.append({"role": role, "content": content})
+
+    # Must end with user so the model generates a reply
+    if messages[-1]["role"] != "user":
+        messages.append({"role": "user", "content": nudge})
+    else:
+        messages[-1]["content"] += f"\n\n{nudge}"
+
+    return messages
+
 def call_ollama(model: str, messages: list, endpoint: str = "http://localhost:11434/api/chat",
-                timeout: int = 90) -> str:
+                timeout: int = 90, **options) -> str:
     """Call Ollama chat API and return the response text.
 
     qwen3 often puts the answer in `thinking` and leaves `content` empty unless
     think=False — without that Ada keeps saying "...I pass."
+    Extra options override defaults (e.g. num_predict=160 for free talk).
     """
     import urllib.request
+    opts = {
+        "temperature": 0.8,
+        "num_predict": 120,
+        "num_thread": 8,
+        "num_ctx": 2048,
+    }
+    opts.update({k: v for k, v in options.items() if v is not None})
     data = json.dumps({
         "model": model,
         "messages": messages,
         "stream": False,
         "think": False,
         "keep_alive": "30m",
-        "options": {
-            "temperature": 0.8,
-            "num_predict": 120,
-            "num_thread": 8,
-            "num_ctx": 2048,
-        },
+        "options": opts,
     }).encode()
     req = urllib.request.Request(endpoint, data=data, method="POST")
     req.add_header("Content-Type", "application/json")

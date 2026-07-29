@@ -25,8 +25,9 @@ if sys.platform == "win32":
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from crosstalk_protocol import (
-    send_msg, send_audio, recv_msgs, call_ollama,
-    build_conversation_messages, generate_tts, wav_duration_seconds, play_local_with_timer,
+    send_msg, send_audio, recv_msgs,
+    build_conversation_messages, generate_unique_reply,
+    generate_tts, wav_duration_seconds, play_local_with_timer,
 )
 from crosstalk_anim import SpeakerAnimation, Colors
 
@@ -235,8 +236,9 @@ def windows_turn():
         mode="debate",
         nudge=round_instr,
     )
-    response = call_ollama(debater["model"], messages, OLLAMA_URL) or (
-        "Still here — modern silicon does not pass on this argument."
+    response = generate_unique_reply(
+        debater["model"], messages, transcript, endpoint=OLLAMA_URL,
+        fallback="Cute try, Tiny — modern silicon is taking a different angle.",
     )
 
     _deliver_local_speech(debater, response)
@@ -276,9 +278,11 @@ def windows_free_talk():
             "or share a thought about being a modern AI."
         ),
     )
-    response = call_ollama(
-        "qwen3:1.7b", messages, OLLAMA_URL, num_predict=160, temperature=0.9,
-    ) or "Hey Tiny — how's the old Mac holding up?"
+    response = generate_unique_reply(
+        "qwen3:1.7b", messages, transcript, endpoint=OLLAMA_URL,
+        fallback="Tiny, give me one 2019 Mac quirk — I'll trade a ROCm war story.",
+        num_predict=160, temperature=0.95,
+    )
 
     _deliver_local_speech(
         {"name": "Ada", "voice": None, "rate": 200, "model": "qwen3:1.7b"},

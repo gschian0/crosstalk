@@ -17,8 +17,9 @@ import subprocess
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from crosstalk_protocol import (
-    send_msg, send_audio, recv_msgs, get_local_ip, call_ollama, call_radeon_gpu,
-    build_conversation_messages, generate_tts, wav_duration_seconds, play_local_with_timer,
+    send_msg, send_audio, recv_msgs, get_local_ip, call_radeon_gpu,
+    build_conversation_messages, generate_unique_reply,
+    generate_tts, wav_duration_seconds, play_local_with_timer,
 )
 from crosstalk_anim import SpeakerAnimation, Colors
 
@@ -278,7 +279,10 @@ def mac_turn():
             mode="debate",
             nudge=round_instr,
         )
-        response = call_ollama(debater["model"], messages, OLLAMA_URL) or "...I pass."
+        response = generate_unique_reply(
+            debater["model"], messages, transcript, endpoint=OLLAMA_URL,
+            fallback="Hold up — let me hit that from a different angle.",
+        )
 
         _deliver_local_speech(debater, response)
 
@@ -356,9 +360,11 @@ def mac_free_talk():
                 "about being an AI on old hardware."
             ),
         )
-        response = call_ollama(
-            "tinyllama", messages, OLLAMA_URL, num_predict=160, temperature=0.9,
-        ) or "...hey Ada, what's up?"
+        response = generate_unique_reply(
+            "tinyllama", messages, transcript, endpoint=OLLAMA_URL,
+            fallback="Ada, trade you a Mac flop story for a ROCm one?",
+            num_predict=160, temperature=0.95,
+        )
 
         _deliver_local_speech(
             {"name": "Tiny", "voice": "Sandy", "rate": 270, "model": "tinyllama"},

@@ -135,6 +135,91 @@ def _strip_think(text: str) -> str:
     text = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL | re.IGNORECASE)
     return text.strip()
 
+def _norm_reply(text: str) -> str:
+    """Normalize text for duplicate detection."""
+    import re
+    t = (text or "").lower().strip()
+    t = re.sub(r"^(tiny|ada|radeon governor)\s*[:\-]\s*", "", t)
+    t = re.sub(r"[^a-z0-9\s]", " ", t)
+    t = re.sub(r"\s+", " ", t).strip()
+    return t
+
+def is_near_duplicate(candidate: str, prior_texts, threshold: float = 0.72) -> bool:
+    """True if candidate looks like a recent line (exact / containment / token overlap)."""
+    cand = _norm_reply(candidate)
+    if len(cand) < 8:
+        return False
+    cand_toks = set(cand.split())
+    if not cand_toks:
+        return False
+    for prior in prior_texts:
+        prev = _norm_reply(prior)
+        if not prev:
+            continue
+        if cand == prev:
+            return True
+        # Near-copy: one contains the other (short parroting)
+        shorter, longer = (cand, prev) if len(cand) <= len(prev) else (prev, cand)
+        if len(shorter) >= 20 and shorter in longer:
+            return True
+        prev_toks = set(prev.split())
+        if not prev_toks:
+            continue
+        overlap = len(cand_toks & prev_toks) / float(max(len(cand_toks), len(prev_toks)))
+        if overlap >= threshold:
+            return True
+    return False
+
+def generate_unique_reply(
+    model: str,
+    messages: list,
+    transcript,
+    *,
+    endpoint: str = "http://localhost:11434/api/chat",
+    fallback: str = "...",
+    max_attempts: int = 3,
+    lookback: int = 8,
+    **options,
+) -> str:
+    """Call Ollama and retry if the reply mirrors a recent transcript line."""
+    import copy
+    priors = [txt for _sp, _sd, txt in (transcript or [])[-lookback:] if (txt or "").strip()]
+    banned = list(priors)
+    msgs = copy.deepcopy(messages)
+    temps = [options.get("temperature", 0.85), 1.05, 1.2]
+    last = ""
+
+    for attempt in range(max_attempts):
+        opts = dict(options)
+        opts["temperature"] = temps[min(attempt, len(temps) - 1)]
+        opts.setdefault("repeat_penalty", 1.35)
+        opts.setdefault("top_p", 0.92)
+        if attempt > 0:
+            ban_note = (
+                "CRITICAL: Your previous draft repeated something already said. "
+                "Say something COMPLETELY DIFFERENT — new angle, new wording, new point. "
+                "Do NOT copy, paraphrase, or echo any recent line from Tiny or Ada."
+            )
+            if msgs and msgs[-1].get("role") == "user":
+                msgs[-1]["content"] = msgs[-1]["content"] + "\n\n" + ban_note
+            else:
+                msgs.append({"role": "user", "content": ban_note})
+
+        reply = call_ollama(model, msgs, endpoint, **opts) or ""
+        reply = reply.strip()
+        last = reply
+        if not reply:
+            continue
+        if is_near_duplicate(reply, banned):
+            banned.append(reply)  # don't reuse the dud itself either
+            continue
+        return reply
+
+    # Last-ditch: force a distinct short fallback so we never speak a clone
+    if last and not is_near_duplicate(last, priors):
+        return last
+    return fallback
+
 def build_conversation_messages(
     transcript,
     *,
@@ -157,24 +242,40 @@ def build_conversation_messages(
     if mode != "judge":
         lines = [(sp, sd, txt) for sp, sd, txt in lines if sd != "judge"]
 
+    anti_echo = (
+        "NEVER repeat or closely paraphrase any recent line — yours or theirs. "
+        "Each reply must be new wording and a new beat in the conversation."
+    )
+
     if mode == "free_talk":
         frame = (
             f'You already debated "{topic}". Now you are hanging out as friends. '
             "Reference earlier jokes and points when it feels natural. "
-            "Ask or answer follow-ups. Keep replies to 2-3 short sentences."
+            "Ask or answer follow-ups. Keep replies to 2-3 short sentences. "
+            + anti_echo
         )
-        default_nudge = "Continue the conversation — react to what was just said."
+        default_nudge = (
+            "Continue the conversation — react to what was just said with a NEW thought. "
+            "Do not reuse anyone's previous wording."
+        )
     elif mode == "debate":
         frame = (
             f'Debate topic: "{topic}". Stay on topic, push your angle, '
-            "and answer the other side's last points. 2-3 short sentences."
+            "and answer the other side's last points. 2-3 short sentences. "
+            + anti_echo
         )
-        default_nudge = f"Your turn, {self_name}. Respond to the latest exchange."
+        default_nudge = (
+            f"Your turn, {self_name}. Respond to the latest exchange with fresh wording — "
+            "do not repeat prior lines."
+        )
     else:
-        frame = f'Topic: "{topic}".'
-        default_nudge = "Continue."
+        frame = f'Topic: "{topic}". {anti_echo}'
+        default_nudge = "Continue with something new."
 
     nudge = (nudge or default_nudge).strip()
+    if "do not repeat" not in nudge.lower() and "don't repeat" not in nudge.lower():
+        nudge = nudge + " Do NOT repeat or echo any previous line."
+
     messages = [{"role": "system", "content": f"{system.strip()}\n\n{frame}".strip()}]
 
     if not lines:
@@ -196,7 +297,7 @@ def build_conversation_messages(
         })
         messages.append({
             "role": "assistant",
-            "content": "Got it — I'll keep that in mind.",
+            "content": "Got it — I'll keep that in mind and say something new each turn.",
         })
 
     for sp, _sd, txt in recent:
@@ -227,10 +328,12 @@ def call_ollama(model: str, messages: list, endpoint: str = "http://localhost:11
     """
     import urllib.request
     opts = {
-        "temperature": 0.8,
+        "temperature": 0.85,
         "num_predict": 120,
         "num_thread": 8,
         "num_ctx": 2048,
+        "repeat_penalty": 1.3,
+        "top_p": 0.92,
     }
     opts.update({k: v for k, v in options.items() if v is not None})
     data = json.dumps({

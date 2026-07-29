@@ -261,6 +261,48 @@ def call_ollama(model: str, messages: list, endpoint: str = "http://localhost:11
     except Exception as e:
         return f"[Error: {e}]"
 
+def generate_unique_reply(model, messages, transcript, *, endpoint=None,
+                          fallback="...let me try a different angle.",
+                          max_retries=3, **options):
+    """Call Ollama and retry if the response is a repeat of a previous turn.
+
+    Compares the response against all previous transcript entries. If it's
+    too similar (first 40 chars match), retries with higher temperature.
+    Returns the first unique response, or the fallback after max_retries.
+    """
+    # Collect previous responses from this model
+    prev_responses = []
+    for sp, sd, txt in transcript:
+        if txt and len(txt) > 10:
+            prev_responses.append(txt.strip().lower()[:60])
+
+    for attempt in range(max_retries):
+        temp = options.get("temperature", 1.1) + (attempt * 0.15)
+        opts = dict(options)
+        opts["temperature"] = temp
+        opts["repeat_penalty"] = 1.3 + (attempt * 0.1)
+
+        reply = call_ollama(model, messages, endpoint=endpoint or "http://localhost:11434/api/chat", **opts)
+        reply_clean = (reply or "").strip()
+
+        if not reply_clean:
+            continue
+
+        # Check if this response is too similar to any previous one
+        reply_prefix = reply_clean.lower()[:60]
+        is_repeat = False
+        for prev in prev_responses:
+            # Check if first 40 chars overlap significantly
+            if reply_prefix[:40] == prev[:40]:
+                is_repeat = True
+                break
+
+        if not is_repeat:
+            return reply_clean
+
+    # All retries produced repeats — return the last one anyway (better than nothing)
+    return reply_clean or fallback
+
 def call_radeon_gpu(messages: list, endpoint: str = "http://127.0.0.1:8899/v1/chat/completions",
                     timeout: int = 300) -> str:
     """Call the Radeon Governor GPU judge via llama-server's OpenAI-compatible API.

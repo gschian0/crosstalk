@@ -69,8 +69,9 @@ class SpeakerAnimation:
         self._lock = threading.Lock()
 
     def _animate(self):
-        """Animation loop — runs in a thread."""
+        """Animation loop — runs in a thread. Overwrites the same 2 lines."""
         frame = 0
+        first_frame = True
         while not self._stop:
             with self._lock:
                 speaker = self._speaker
@@ -88,40 +89,34 @@ class SpeakerAnimation:
 
             # Build waveform animation
             if mode == "generating":
-                # Thinking dots animation
                 dots = "." * ((frame % 3) + 1)
-                wave = f"{Colors.DIM}{'  ' * 20}{Colors.RESET}"
-                line = f"  {icon} {color}{Colors.BOLD}{speaker}{Colors.RESET} {Colors.DIM}({model}){Colors.RESET} {Colors.YELLOW}⚡ thinking{dots}{Colors.RESET}"
+                line = f"  {icon} {color}{Colors.BOLD}{speaker}{Colors.RESET} {Colors.DIM}({model}){Colors.RESET} {Colors.YELLOW}⚡ thinking{dots}   {Colors.RESET}"
+                wave = ""
             elif mode == "audio":
-                # Waveform animation
+                import math
                 wave_width = 30
                 wave_bar = ""
                 for i in range(wave_width):
-                    idx = (frame + i * 3) % len(WAVE_CHARS)
-                    # Add some randomness via sine-like pattern
-                    import math
                     val = int((math.sin((frame + i) * 0.3) * 0.5 + 0.5) * (len(WAVE_CHARS) - 1))
                     wave_bar += WAVE_CHARS[val]
+                line = f"  {icon} {color}{Colors.BOLD}{speaker}{Colors.RESET} {Colors.DIM}({model}){Colors.RESET} {Colors.CYAN}🔊 speaking   {Colors.RESET}"
                 wave = f"  {color}{wave_bar}{Colors.RESET}"
-                line = f"  {icon} {color}{Colors.BOLD}{speaker}{Colors.RESET} {Colors.DIM}({model}){Colors.RESET} {Colors.CYAN}🔊 speaking{Colors.RESET}"
             else:
-                wave = ""
                 line = f"  {icon} {color}{speaker}{Colors.RESET}"
+                wave = ""
 
-            # Print line + waveform, overwrite previous
-            terminal_width = shutil.get_terminal_size((80, 24)).columns
-            # Clear previous lines (2 lines: label + waveform)
-            sys.stdout.write("\033[2K\r")  # Clear current line
-            sys.stdout.write(f"\033[1A\033[2K\r")  # Move up and clear
+            # Move cursor up to overwrite previous frame (2 lines)
+            if not first_frame:
+                sys.stdout.write("\033[2A")  # Move up 2 lines
+            sys.stdout.write("\033[2K\r")  # Clear line 1
             sys.stdout.write(f"{line}\n")
-            if wave:
-                sys.stdout.write(f"{wave}\n")
-            else:
-                sys.stdout.write("\n")
+            sys.stdout.write("\033[2K\r")  # Clear line 2
+            sys.stdout.write(f"{wave}\n")
             sys.stdout.flush()
+            first_frame = False
 
             frame += 1
-            time.sleep(0.08)
+            time.sleep(0.12)
 
     def show_generating(self, speaker: str, side: str, model: str, status: str = ""):
         """Show 'generating/thinking' animation."""
@@ -195,14 +190,13 @@ class SpeakerAnimation:
             self._thread.start()
 
     def stop(self):
-        """Stop the animation."""
+        """Stop the animation and clear the lines."""
         self._stop = True
         if self._thread and self._thread.is_alive():
             self._thread.join(timeout=0.5)
         self._thread = None
         with self._lock:
             self._mode = "idle"
-        # Clear the animation lines
-        sys.stdout.write("\033[2K\r")
-        sys.stdout.write(f"\033[1A\033[2K\r")
+        # Clear the 2 animation lines
+        sys.stdout.write("\033[2A\033[2K\r\033[2K\r")
         sys.stdout.flush()

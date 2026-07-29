@@ -60,10 +60,10 @@ def recv_audio(sock: socket.socket) -> bytes:
     return recv_exact(sock, size)
 
 def recv_msgs(sock: socket.socket, callback, on_disconnect=None) -> None:
-    """Receive JSON messages in a loop. Calls callback(msg_dict) for each.
+    """Receive JSON messages in a loop. Calls callback(msg_dict, audio_bytes) for each.
     If a message has "type": "turn_start", the next data is audio bytes
-    (4-byte length + raw audio). callback receives (msg, audio_bytes) in that case.
-    For all other messages, callback receives (msg, None).
+    (4-byte length header + raw audio). The audio is read from the buffer first,
+    then the socket if needed.
     """
     buf = b""
     try:
@@ -72,25 +72,42 @@ def recv_msgs(sock: socket.socket, callback, on_disconnect=None) -> None:
             if not chunk:
                 break
             buf += chunk
-            while DELIMITER in buf:
-                line, buf = buf.split(DELIMITER, 1)
-                if line.strip():
-                    try:
-                        msg = json.loads(line)
-                    except json.JSONDecodeError:
-                        continue
+            while True:
+                # Try to extract a complete JSON line from buffer
+                idx = buf.find(DELIMITER)
+                if idx == -1:
+                    break  # Need more data
+                line = buf[:idx]
+                buf = buf[idx + len(DELIMITER):]
+                if not line.strip():
+                    continue
+                try:
+                    msg = json.loads(line)
+                except (json.JSONDecodeError, UnicodeDecodeError):
+                    continue
 
-                    # If this is a turn_start, read the audio that follows
-                    audio = None
-                    if msg.get("type") == "turn_start":
-                        try:
-                            audio = recv_audio(sock)
-                        except ConnectionError:
-                            break
+                # If this is a turn_start, read audio from buffer (then socket)
+                audio = None
+                if msg.get("type") == "turn_start":
+                    # Read 4-byte length header from buffer
+                    while len(buf) < 4:
+                        more = sock.recv(4096)
+                        if not more:
+                            raise ConnectionError("Socket closed during audio header")
+                        buf += more
+                    size = struct.unpack(">I", buf[:4])[0]
+                    buf = buf[4:]
+                    if size > 0:
+                        # Read audio data from buffer (then socket)
+                        while len(buf) < size:
+                            more = sock.recv(65536)
+                            if not more:
+                                raise ConnectionError("Socket closed during audio data")
+                            buf += more
+                        audio = buf[:size]
+                        buf = buf[size:]
 
-                    callback(msg, audio)
-            # Small sleep to avoid busy-looping
-            time.sleep(0.001)
+                callback(msg, audio)
     except (ConnectionError, OSError):
         pass
     finally:
@@ -129,6 +146,28 @@ def call_ollama(model: str, messages: list, endpoint: str = "http://localhost:11
             return result.get("message", {}).get("content", "").strip()
     except Exception as e:
         return f"[Error: {e}]"
+
+def call_radeon_gpu(messages: list, endpoint: str = "http://127.0.0.1:8899/v1/chat/completions",
+                    timeout: int = 300) -> str:
+    """Call the Radeon Governor GPU judge via llama-server's OpenAI-compatible API.
+    This is much faster than Ollama CPU for the judge verdict."""
+    import urllib.request
+    data = json.dumps({
+        "messages": messages,
+        "max_tokens": 600,
+        "temperature": 0.8,
+        "top_p": 0.9,
+        "repeat_penalty": 1.1,
+    }).encode()
+    req = urllib.request.Request(endpoint, data=data, method="POST")
+    req.add_header("Content-Type", "application/json")
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            result = json.loads(resp.read())
+            return result.get("choices", [{}])[0].get("message", {}).get("content", "").strip()
+    except Exception as e:
+        # Fallback to Ollama if GPU server is down
+        return call_ollama("qwen2.5:3b", messages)
 
 # ─── TTS: Generate audio bytes ───────────────────────────────────
 

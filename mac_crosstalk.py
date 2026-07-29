@@ -24,7 +24,7 @@ import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from crosstalk_protocol import (
-    send_msg, recv_msgs, get_local_ip, call_ollama,
+    send_msg, recv_msgs, get_local_ip, call_ollama, call_radeon_gpu,
     generate_tts, play_audio, is_mac,
 )
 from crosstalk_anim import SpeakerAnimation, Colors
@@ -234,7 +234,7 @@ def judge_verdict():
     anim.show_generating(judge["name"], "judge", judge["model"] + " (GPU)",
                          "Radeon GPU generating verdict...")
 
-    verdict = call_ollama(judge["model"], messages, OLLAMA_URL)
+    verdict = call_radeon_gpu(messages)
     if not verdict:
         verdict = "I declare a tie."
 

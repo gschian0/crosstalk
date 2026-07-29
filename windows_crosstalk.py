@@ -118,22 +118,21 @@ def on_message(msg, audio_bytes):
         side = msg.get("side", "mac")
         model = msg.get("model", "?")
 
-        # Play the streamed audio
+        # FIX: Receiver does NOT speak — the sender already spoke on its own machine.
+        # Each machine only hears its own AI voice. One speaker at a time.
+        # (Mac already spoke Tiny's text with 'say' on the Mac side)
         # if audio_bytes:
         #     play_audio(audio_bytes)
-
-        # FIX: Generate TTS locally using Windows SAPI
-        # The streamed audio bytes may not play correctly on all Windows audio setups
-        if text.strip():
-            import subprocess
-            safe_text = text.strip().replace("'", "''").replace('"', "")
-            ps_cmd = f"""
-            Add-Type -AssemblyName System.Speech
-            $synth = New-Object System.Speech.Synthesis.SpeechSynthesizer
-            $synth.Rate = 0
-            $synth.Speak(\"{safe_text}\")
-            """
-            subprocess.run(["powershell", "-Command", ps_cmd], capture_output=True)
+        # if text.strip():
+        #     import subprocess
+        #     safe_text = text.strip().replace("'", "''").replace('"', "")
+        #     ps_cmd = f"""
+        #     Add-Type -AssemblyName System.Speech
+        #     $synth = New-Object System.Speech.Synthesis.SpeechSynthesizer
+        #     $synth.Rate = 0
+        #     $synth.Speak("{safe_text}")
+        #     """
+        #     subprocess.run(["powershell", "-Command", ps_cmd], capture_output=True)
 
         anim.show_text(speaker, side, text, model)
         transcript.append((speaker, side, text))

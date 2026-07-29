@@ -133,16 +133,15 @@ def on_message(msg, audio_bytes):
         side = msg.get("side", "windows")
         model = msg.get("model", "?")
 
-        # Play the streamed audio
+        # FIX: Receiver does NOT speak — the sender already spoke on its own machine.
+        # Each machine only hears its own AI voice. One speaker at a time.
+        # (Windows already spoke Ada's text with SAPI on the Windows side)
         # if audio_bytes:
         #     play_audio(audio_bytes)
-
-        # FIX: Generate TTS locally with correct audio device (94 = MacBook speakers)
-        # The streamed audio bytes don't route through the right device on Mac
-        import subprocess
-        if text.strip():
-            subprocess.run(["say", "-v", "Alex", "-r", "200", "-a", AUDIO_DEVICE, text.strip()],
-                           capture_output=True)
+        # import subprocess
+        # if text.strip():
+        #     subprocess.run(["say", "-v", "Alex", "-r", "200", "-a", AUDIO_DEVICE, text.strip()],
+        #                    capture_output=True)
 
         anim.show_text(speaker, side, text, model)
         transcript.append((speaker, side, text))

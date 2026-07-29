@@ -243,8 +243,12 @@ def mac_turn():
     # done_event.wait(timeout=30)  # Wait up to 30s for Windows to finish
     # _temp_done_callback = None
 
-    # FIX: Sender does NOT play locally — only the receiver plays audio.
-    # This eliminates all sync issues. The sender just prints the text.
+    # FIX: Sender speaks locally with its own voice (say -a 94 = MacBook speakers)
+    # Then the receiver also speaks it locally on their side
+    import subprocess
+    if response.strip():
+        subprocess.run(["say", "-v", debater["voice"], "-r", str(debater["rate"]), "-a", AUDIO_DEVICE, response.strip()],
+                       capture_output=True)
     anim.show_text(debater["name"], "mac", response, debater["model"])
     transcript.append((debater["name"], "mac", response))
 
@@ -405,7 +409,11 @@ def mac_free_talk():
     # done_event.wait(timeout=30)
     # _temp_done_callback = None
 
-    # FIX: Sender does NOT play locally — only receiver plays audio
+    # FIX: Sender speaks locally with its own voice (say -a 94 = MacBook speakers)
+    import subprocess
+    if response.strip():
+        subprocess.run(["say", "-v", "Sandy", "-r", "270", "-a", AUDIO_DEVICE, response.strip()],
+                       capture_output=True)
     anim.show_text("Tiny", "mac", response, "tinyllama (free talk)")
     transcript.append(("Tiny", "mac", response))
 

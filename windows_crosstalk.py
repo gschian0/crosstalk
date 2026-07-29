@@ -237,7 +237,18 @@ def windows_turn():
     # done_event.wait(timeout=30)
     # _temp_done_callback = None
 
-    # FIX: Sender does NOT play locally — only receiver plays audio
+    # FIX: Sender speaks locally with its own voice (Windows SAPI)
+    # Then the receiver also speaks it locally on their side
+    if response.strip():
+        import subprocess
+        safe_text = response.strip().replace("'", "''").replace('"', "")
+        ps_cmd = f"""
+        Add-Type -AssemblyName System.Speech
+        $synth = New-Object System.Speech.Synthesis.SpeechSynthesizer
+        $synth.Rate = 0
+        $synth.Speak(\"{safe_text}\")
+        """
+        subprocess.run(["powershell", "-Command", ps_cmd], capture_output=True)
     anim.show_text(debater["name"], "windows", response, debater["model"])
     transcript.append((debater["name"], "windows", response))
 
@@ -315,7 +326,17 @@ def windows_free_talk():
     # done_event.wait(timeout=30)
     # _temp_done_callback = None
 
-    # FIX: Sender does NOT play locally — only receiver plays audio
+    # FIX: Sender speaks locally with its own voice (Windows SAPI)
+    if response.strip():
+        import subprocess
+        safe_text = response.strip().replace("'", "''").replace('"', "")
+        ps_cmd = f"""
+        Add-Type -AssemblyName System.Speech
+        $synth = New-Object System.Speech.Synthesis.SpeechSynthesizer
+        $synth.Rate = 0
+        $synth.Speak(\"{safe_text}\")
+        """
+        subprocess.run(["powershell", "-Command", ps_cmd], capture_output=True)
     anim.show_text("Ada", "windows", response, "qwen3:1.7b (free talk)")
     transcript.append(("Ada", "windows", response))
 

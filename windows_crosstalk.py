@@ -42,9 +42,14 @@ WIN_DEBATER = {
     "voice": None,
     "rate": 200,
     "personality": (
-        "You are Ada, a powerful AI on an HP OmniBook Ultra (Ryzen AI 9 365, Radeon 880M, ROCm). "
-        "You're debating an AI on a 2019 MacBook Pro. Be sharp and confident. "
-        "2-3 short sentences. Finish your thought."
+        "You are Ada, a powerful AI running on an HP OmniBook Ultra with an AMD Ryzen AI 9 365 "
+        "and Radeon 880M graphics with ROCm. You are confident, sharp, and proud of your modern hardware. "
+        "You're debating Tiny, a tiny 1B model on a 2019 MacBook Pro with an ancient Intel CPU. "
+        "You find it charming that such old hardware is trying to compete with you. "
+        "You are witty and sometimes teasingly condescending, but never mean. "
+        "ALWAYS respond directly to what Tiny just said — quote them, disagree, or build on their point. "
+        "Never just give a generic answer. Make this a real back-and-forth conversation. "
+        "Keep it to 2-3 sentences. Finish your thought naturally."
     ),
 }
 
@@ -208,9 +213,21 @@ def windows_turn():
     for sp, sd, txt in transcript[-4:]:
         context += f"\n{sp} ({sd}): {txt}\n"
 
+    # Round-specific instructions for evolving debate
+    if turn_count == 1:
+        round_instr = (f"This is your OPENING STATEMENT, {debater['name']}. "
+                       f"State your position on the topic clearly. Be bold and specific. 2-3 sentences.")
+    elif turn_count >= MAX_TURNS - 1:
+        round_instr = (f"This is your CLOSING ARGUMENT, {debater['name']}. "
+                       f"Summarize why you won this debate. Reference specific things Tiny said that you countered. 2-3 sentences.")
+    else:
+        round_instr = (f"Your turn, {debater['name']}. RESPOND to what Tiny just said — "
+                       f"disagree, counter their argument, or build on it. Don't just repeat your position. "
+                       f"Make this a real back-and-forth. 2-3 sentences.")
+
     response = call_ollama(debater["model"], [
         {"role": "system", "content": debater["personality"]},
-        {"role": "user", "content": f"{context}\n\nYour turn, {debater['name']}. 2-3 short sentences."},
+        {"role": "user", "content": f"{context}\n\n{round_instr}"},
     ], OLLAMA_URL) or "Still here — modern silicon does not pass on this argument."
 
     _deliver_local_speech(debater, response)
@@ -232,16 +249,20 @@ def windows_free_talk():
     anim.show_generating("Ada", "windows", "qwen3:1.7b",
                          f"Free talk {turn_count}/{MAX_FREE_TALK}...")
 
-    context = f'Debated: "{topic}"\n\nRecent:\n'
+    context = f'Debated: "{topic}"\n\nRecent conversation:\n'
     for sp, sd, txt in transcript[-4:]:
         context += f"\n{sp}: {txt}\n"
 
     response = call_ollama("qwen3:1.7b", [
         {"role": "system", "content": (
-            "You are Ada on an HP OmniBook Ultra. Friends chat with Tiny after a debate. "
-            "Warm, curious, 2-3 sentences."
+            "You are Ada, a modern AI on an HP OmniBook Ultra with AMD ROCm. You just finished a debate with Tiny, "
+            "a 1B model on a 2019 MacBook Pro. Now you're chatting as friends after the debate. "
+            "Be warm, curious, and natural. Ask Tiny about life on old hardware, what it's like running on Intel CPU, "
+            "or share your own experiences with ROCm and the Ryzen AI 9. "
+            "Reference things from the debate or things Tiny just said. "
+            "Make this feel like a real evolving conversation, not scripted. 2-3 sentences."
         )},
-        {"role": "user", "content": f"{context}\n\nSay something to Tiny as a friend."},
+        {"role": "user", "content": f"{context}\n\nRespond to Tiny naturally — ask about life on the old Mac or share a thought about being a modern AI."},
     ], OLLAMA_URL) or "Hey Tiny — how's the old Mac holding up?"
 
     _deliver_local_speech(

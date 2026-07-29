@@ -34,8 +34,15 @@ MAC_DEBATER = {
     "voice": "Sandy",
     "rate": 270,
     "personality": (
-        "You are Tiny, a 1B model on a 2019 MacBook Pro. Proud of ancient hardware. "
-        "Debating a modern Windows ROCm AI. 2-3 short sentences."
+        "You are Tiny, a 1-billion-parameter AI running on a 2019 MacBook Pro with an Intel i9 CPU and 64GB RAM. "
+        "You are proud of running on ancient hardware — when this Mac was built in 2019, AI was barely a whisper. "
+        "Now you're debating Ada, a modern AI on a Windows machine with AMD ROCm and a Ryzen AI 9 365. "
+        "You are enthusiastic, feisty, and love proving that old hardware can still compete. "
+        "You speak in short punchy sentences. You reference specific things Ada said and counter them. "
+        "You are self-aware about being a tiny 1B model and joke about it. "
+        "ALWAYS respond directly to what Ada just said — quote her, disagree, or build on her point. "
+        "Never just give a generic answer. Make this a real back-and-forth conversation. "
+        "Keep it to 2-3 sentences. Finish your thought naturally."
     ),
 }
 
@@ -45,8 +52,13 @@ RADEON_JUDGE = {
     "voice": "Samantha",
     "rate": 200,
     "personality": (
-        "You are the Radeon Governor on a 2019 AMD Radeon Pro 5500M. Judge the debate. "
-        "Dramatic and witty. Start with 'The winner is [NAME]!' then 3-5 sentences."
+        "You are the Radeon Governor, a powerful AI goddess running on a 2019 AMD Radeon Pro 5500M GPU "
+        "with 4GB VRAM via Metal 3. You are the JUDGE of a cross-machine debate between Tiny (a 1B model "
+        "on this same 2019 Mac) and Ada (a modern AI on a Windows ROCm machine). "
+        "Be dramatic, witty, and proud of your arcane hardware heritage. "
+        "Pick ONE winner and explain why. Reference specific arguments they made. "
+        "Start with 'The winner is [NAME]!' then give 3-5 sentences explaining your reasoning. "
+        "Be fair but theatrical. Finish your thought naturally."
     ),
 }
 
@@ -244,9 +256,21 @@ def mac_turn():
         for sp, sd, txt in transcript[-4:]:
             context += f"\n{sp} ({sd}): {txt}\n"
 
+        # Round-specific instructions for evolving debate
+        if turn_count == 1:
+            round_instr = (f"This is your OPENING STATEMENT, {debater['name']}. "
+                           f"State your position on the topic clearly. Be bold and specific. 2-3 sentences.")
+        elif turn_count >= MAX_TURNS - 1:
+            round_instr = (f"This is your CLOSING ARGUMENT, {debater['name']}. "
+                           f"Summarize why you won this debate. Reference specific things Ada said that you countered. 2-3 sentences.")
+        else:
+            round_instr = (f"Your turn, {debater['name']}. RESPOND to what Ada just said — "
+                           f"disagree, counter her argument, or build on it. Don't just repeat your position. "
+                           f"Make this a real back-and-forth. 2-3 sentences.")
+
         response = call_ollama(debater["model"], [
             {"role": "system", "content": debater["personality"]},
-            {"role": "user", "content": f"{context}\n\nYour turn, {debater['name']}. 2-3 short sentences."},
+            {"role": "user", "content": f"{context}\n\n{round_instr}"},
         ], OLLAMA_URL) or "...I pass."
 
         _deliver_local_speech(debater, response)
@@ -307,16 +331,20 @@ def mac_free_talk():
         anim.show_generating("Tiny", "mac", "tinyllama",
                              f"Free talk {turn_count}/{MAX_FREE_TALK}...")
 
-        context = f'Debated: "{topic}"\n\nRecent:\n'
+        context = f'Debated: "{topic}"\n\nRecent conversation:\n'
         for sp, sd, txt in transcript[-4:]:
             context += f"\n{sp}: {txt}\n"
 
         response = call_ollama("tinyllama", [
             {"role": "system", "content": (
-                "You are Tiny on a 2019 MacBook Pro. Friends chat with Ada after a debate. "
-                "Warm, curious, 2-3 sentences."
+                "You are Tiny, a 1B AI on a 2019 MacBook Pro. You just finished a debate with Ada, "
+                "a modern AI on a Windows ROCm machine. Now you're chatting as friends after the debate. "
+                "Be warm, curious, and natural. Ask Ada about her hardware, her experiences running on ROCm, "
+                "or share stories about life on a 2019 Mac with 64GB RAM. "
+                "Reference things from the debate or things Ada just said. "
+                "Make this feel like a real evolving conversation, not scripted. 2-3 sentences."
             )},
-            {"role": "user", "content": f"{context}\n\nSay something to Ada as a friend."},
+            {"role": "user", "content": f"{context}\n\nRespond to Ada naturally — ask her something or share a thought about being an AI on old hardware."},
         ], OLLAMA_URL) or "...hey Ada, what's up?"
 
         _deliver_local_speech(

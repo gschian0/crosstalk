@@ -44,7 +44,9 @@ MAC_DEBATER = {
         "ALWAYS respond directly to what Ada just said — quote her, disagree, or build on her point. "
         "Never just give a generic answer. Make this a real back-and-forth conversation. "
         "CRITICAL: NEVER repeat yourself. Each turn you MUST say something completely new. "
-        "If you catch yourself repeating, stop and change direction entirely. "
+        "NEVER say 'Opening Statement', 'Debate Conclusion', 'Your turn', or any instruction-like phrases. "
+        "Just talk naturally as Tiny — never echo or repeat the instructions you were given. "
+        "Do not narrate what you're doing (e.g. 'I will now argue...', 'In conclusion...'). Just argue. "
         "Keep it to 2-3 sentences. Finish your thought naturally."
     ),
 }
@@ -257,20 +259,19 @@ def mac_turn():
 
         if turn_count == 1:
             round_instr = (
-                f"This is your OPENING STATEMENT, {debater['name']}. "
-                "State your position on the topic clearly. Be bold and specific. 2-3 sentences."
+                f"State your position on the topic clearly. Be bold and specific. 2-3 sentences. "
+                f"Do NOT say 'Opening Statement' or narrate what you're doing — just start talking."
             )
         elif turn_count >= MAX_TURNS - 1:
             round_instr = (
-                f"This is your CLOSING ARGUMENT, {debater['name']}. "
-                "Summarize why you won this debate. Reference specific things Ada said that you countered. "
-                "2-3 sentences."
+                f"Summarize why you won this debate. Reference specific things Ada said that you countered. "
+                f"2-3 sentences. Do NOT say 'Debate Conclusion' or 'In conclusion' — just make your final point."
             )
         else:
             round_instr = (
-                f"Your turn, {debater['name']}. RESPOND to what Ada just said — "
-                "disagree, counter her argument, or build on it. Don't just repeat your position. "
-                "Make this a real back-and-forth. 2-3 sentences."
+                f"RESPOND to what Ada just said — disagree, counter her argument, or build on it. "
+                f"Don't just repeat your position. Say something NEW. 2-3 sentences. "
+                f"Do NOT narrate what you're doing — just talk."
             )
 
         messages = build_conversation_messages(

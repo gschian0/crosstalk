@@ -3,7 +3,7 @@
 🍎 CROSSTALK — MAC SIDE (Host)
 
 Two-computer conversation:
-  - Tiny / judge speak ONLY on this Mac (say → MacBook speakers device 94)
+  - Phi / judge speak ONLY on this Mac (say → MacBook speakers device 94)
   - Ada's text is shown here; we WAIT on duration_ms — never voice her here
   - Speak lock + timer prevent overlap
 """
@@ -30,13 +30,14 @@ MAX_TURNS = 6
 MAX_FREE_TALK = 40  # soft ceiling so free talk can keep evolving
 
 MAC_DEBATER = {
-    "name": "Tiny",
-    "model": "tinyllama",
-    "voice": "Sandy",
-    "rate": 270,
+    "name": "Phi",
+    "model": "phi3.5",
+    "voice": "Karen",
+    "rate": 240,
     "personality": (
-        "You are Tiny, a tiny 1B AI on a 2019 MacBook Pro. You're feisty and proud of old hardware. "
-        "You're debating Ada on a modern Windows PC. Be short, punchy, and funny. 2 sentences max."
+        "You are Phi, a fast-talking energetic 3.8B AI running on a 2019 MacBook Pro with an Intel CPU. "
+        "You're proud of running on ancient 2019 hardware. You're debating Ada on a modern Windows PC with ROCm. "
+        "Be bold, entertaining, and witty. Respond to what Ada said. 2-3 sentences."
     ),
 }
 
@@ -47,7 +48,7 @@ RADEON_JUDGE = {
     "rate": 200,
     "personality": (
         "You are the Radeon Governor, a powerful AI goddess running on a 2019 AMD Radeon Pro 5500M GPU "
-        "with 4GB VRAM via Metal 3. You are the JUDGE of a cross-machine debate between Tiny (a 1B model "
+        "with 4GB VRAM via Metal 3. You are the JUDGE of a cross-machine debate between Phi (a 3.8B model "
         "on this same 2019 Mac) and Ada (a modern AI on a Windows ROCm machine). "
         "Be dramatic, witty, and proud of your arcane hardware heritage. "
         "Pick ONE winner and explain why. Reference specific arguments they made. "
@@ -71,7 +72,7 @@ def print_banner():
     ip = get_local_ip()
     print()
     print(f"{Colors.BBLUE}{Colors.BOLD}╔══════════════════════════════════════════════════════════════╗{Colors.RESET}")
-    print(f"{Colors.BBLUE}{Colors.BOLD}║  🍎 CROSSTALK — Tiny speaks HERE only                      ║{Colors.RESET}")
+    print(f"{Colors.BBLUE}{Colors.BOLD}║  🍎 CROSSTALK — Phi speaks HERE only                       ║{Colors.RESET}")
     print(f"{Colors.BBLUE}{Colors.BOLD}║  Ada talks on Windows — wait on duration timer             ║{Colors.RESET}")
     print(f"{Colors.BBLUE}{Colors.BOLD}╚══════════════════════════════════════════════════════════════╝{Colors.RESET}")
     print()
@@ -163,7 +164,7 @@ def handle_peer_text(msg, meta):
     wait_s = max(0.4, float(dur_ms) / 1000.0) if dur_ms else wav_duration_seconds(audio, 2.5)
 
     if not speak_lock.acquire(blocking=False):
-        anim.show_info("⏳ Tiny busy — ack only", Colors.YELLOW)
+        anim.show_info("⏳ Phi busy — ack only", Colors.YELLOW)
         send_msg(client_sock, {"type": "turn_done", "side": "mac"})
         return
 
@@ -322,14 +323,14 @@ def mac_free_talk():
 
     try:
         turn_count += 1
-        anim.show_generating("Tiny", "mac", "tinyllama",
+        anim.show_generating("Phi", "mac", "phi3.5",
                              f"Free talk {turn_count}/{MAX_FREE_TALK}...")
 
         messages = build_conversation_messages(
             transcript,
-            self_name="Tiny",
+            self_name="Phi",
             system=(
-                "You are Tiny, a 1B AI on a 2019 MacBook Pro. You just finished a debate with Ada, "
+                "You are Phi, a 3.8B AI on a 2019 MacBook Pro. You just finished a debate with Ada, "
                 "a modern AI on a Windows ROCm machine. Now you're chatting as friends after the debate. "
                 "Be warm, curious, and natural. Ask Ada about her hardware, her experiences running on ROCm, "
                 "or share stories about life on a 2019 Mac with 64GB RAM. "
@@ -344,15 +345,15 @@ def mac_free_talk():
             ),
         )
         response = generate_unique_reply(
-            "tinyllama", messages, transcript, endpoint=OLLAMA_URL,
+            "phi3.5", messages, transcript, endpoint=OLLAMA_URL,
             fallback="Ada, trade you a Mac flop story for a ROCm one?",
             num_predict=160, temperature=0.95,
         )
 
         _deliver_local_speech(
-            {"name": "Tiny", "voice": "Sandy", "rate": 270, "model": "tinyllama"},
+            {"name": "Phi", "voice": "Karen", "rate": 240, "model": "phi3.5"},
             response,
-            model_label="tinyllama (free talk)",
+            model_label="phi3.5 (free talk)",
         )
 
         if turn_count >= MAX_FREE_TALK:

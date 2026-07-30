@@ -257,22 +257,13 @@ def mac_turn():
         anim.show_generating(debater["name"], "mac", debater["model"],
                              f"Generating... ({turn_count}/{MAX_TURNS})")
 
+        # Simple nudges — no instruction labels, just natural prompts
         if turn_count == 1:
-            round_instr = (
-                f"State your position on the topic clearly. Be bold and specific. 2-3 sentences. "
-                f"Do NOT say 'Opening Statement' or narrate what you're doing — just start talking."
-            )
+            round_instr = f"What's your take on this, {debater['name']}?"
         elif turn_count >= MAX_TURNS - 1:
-            round_instr = (
-                f"Summarize why you won this debate. Reference specific things Ada said that you countered. "
-                f"2-3 sentences. Do NOT say 'Debate Conclusion' or 'In conclusion' — just make your final point."
-            )
+            round_instr = "Last word — anything else to add?"
         else:
-            round_instr = (
-                f"RESPOND to what Ada just said — disagree, counter her argument, or build on it. "
-                f"Don't just repeat your position. Say something NEW. 2-3 sentences. "
-                f"Do NOT narrate what you're doing — just talk."
-            )
+            round_instr = "Your turn."
 
         messages = build_conversation_messages(
             transcript,

@@ -230,13 +230,13 @@ def call_ollama(model: str, messages: list, endpoint: str = "http://localhost:11
     """
     import urllib.request
     opts = {
-        "temperature": 1.1,
-        "num_predict": 200,
+        "temperature": 0.7,
+        "num_predict": 80,
         "num_thread": 8,
-        "num_ctx": 4096,
+        "num_ctx": 2048,
         "repeat_penalty": 1.3,
         "top_k": 40,
-        "top_p": 0.9,
+        "top_p": 0.85,
     }
     opts.update({k: v for k, v in options.items() if v is not None})
     data = json.dumps({
